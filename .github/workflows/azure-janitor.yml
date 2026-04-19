@@ -1,0 +1,161 @@
+name: Azure Janitor
+
+# ---------------------------------------------------------------------------
+# Daily backstop for the weekly smoke-test workflow.
+#
+# For every RG in AZURE_RUN_RGS:
+#   * if it contains no resources → nothing to do.
+#   * if it contains resources → re-attempt the complete-mode empty
+#     deployment (up to 3x with backoff).
+#   * if after that it is still not empty → open (or update) a GitHub
+#     issue tagged `azure-cleanup` with the list of stuck resources.
+#
+# This is the "Layer 3" in docs/ci-azure.md.  The subscription budget
+# alert configured at bootstrap time is "Layer 4" and fires even if this
+# workflow itself stops running.
+# ---------------------------------------------------------------------------
+
+on:
+  schedule:
+    # Every day at 06:00 UTC
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  id-token: write      # OIDC to Azure
+  contents: read
+  issues: write        # open/update the tracking issue
+
+concurrency:
+  group: azure-janitor
+  cancel-in-progress: false
+
+jobs:
+  janitor:
+    name: Sweep stale run RGs
+    runs-on: ubuntu-latest
+    environment: azure-janitor   # matches federated credential subject
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id:       ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id:       ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sweep run RGs
+        id: sweep
+        env:
+          AZURE_RUN_RGS: ${{ vars.AZURE_RUN_RGS }}
+        run: |
+          set -u
+          read -r -a pool <<< "$AZURE_RUN_RGS"
+          if [ "${#pool[@]}" -eq 0 ]; then
+            echo "AZURE_RUN_RGS variable is empty" >&2
+            exit 1
+          fi
+
+          stuck_rgs=()
+          stuck_report=""
+
+          for rg in "${pool[@]}"; do
+            echo "::group::Sweep $rg"
+            remaining=$(az resource list -g "$rg" --query "length(@)" -o tsv 2>/dev/null || echo "0")
+            if [ "$remaining" -eq 0 ]; then
+              echo "$rg: already empty"
+              echo "::endgroup::"
+              continue
+            fi
+
+            echo "$rg: $remaining resource(s) present — attempting teardown"
+            for attempt in 1 2 3; do
+              if az deployment group create \
+                   --resource-group "$rg" \
+                   --name "janitor-$(date -u +%Y%m%d-%H%M%S)" \
+                   --mode Complete \
+                   --template-file scripts/azure/empty-rg.json; then
+                break
+              fi
+              echo "Attempt ${attempt} failed for $rg"
+              sleep 60
+            done
+
+            remaining=$(az resource list -g "$rg" --query "length(@)" -o tsv 2>/dev/null || echo "0")
+            if [ "$remaining" -ne 0 ]; then
+              stuck_rgs+=("$rg")
+              stuck_report+=$'\n### '"$rg"$'\n\n```\n'
+              stuck_report+=$(az resource list -g "$rg" -o table 2>&1 || true)
+              stuck_report+=$'\n```\n'
+            else
+              echo "$rg: drained successfully"
+            fi
+            echo "::endgroup::"
+          done
+
+          if [ "${#stuck_rgs[@]}" -gt 0 ]; then
+            {
+              echo "stuck=true"
+              echo "stuck_list=${stuck_rgs[*]}"
+              echo "report<<STUCKEOF"
+              echo "$stuck_report"
+              echo "STUCKEOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "stuck=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open or update tracking issue
+        if: steps.sweep.outputs.stuck == 'true'
+        uses: actions/github-script@v7
+        env:
+          STUCK_LIST: ${{ steps.sweep.outputs.stuck_list }}
+          REPORT:     ${{ steps.sweep.outputs.report }}
+          RUN_URL:    ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            const title = `Azure cleanup stuck: ${process.env.STUCK_LIST}`;
+            const body  =
+              `The **Azure Janitor** workflow could not drain the following run RG(s) after 3 attempts.\n\n` +
+              `Run: ${process.env.RUN_URL}\n\n` +
+              `${process.env.REPORT}\n\n` +
+              `_This issue is updated by the janitor workflow. Close it once the RGs are clean._`;
+
+            // Find an existing open issue with the azure-cleanup label to avoid duplicates.
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              state: 'open',
+              labels: 'azure-cleanup',
+              per_page: 10,
+            });
+
+            if (existing.data.length > 0) {
+              const issue = existing.data[0];
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                issue_number: issue.number,
+                body,
+              });
+              core.notice(`Updated existing cleanup issue #${issue.number}`);
+            } else {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                title,
+                body,
+                labels: ['azure-cleanup', 'automated'],
+              });
+              core.notice(`Opened cleanup issue #${created.data.number}`);
+            }
+
+      - name: Fail job if any RG is still stuck
+        if: steps.sweep.outputs.stuck == 'true'
+        run: |
+          echo "::error::One or more run RGs are still not empty: ${{ steps.sweep.outputs.stuck_list }}"
+          exit 1
