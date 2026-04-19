@@ -60,6 +60,8 @@ jobs:
             exit 1
           fi
           week=$(date -u +%V)
+          # `10#` forces base-10 parsing; ISO week numbers like "08"/"09"
+          # would otherwise be treated as invalid octal by bash arithmetic.
           idx=$(( 10#$week % ${#pool[@]} ))
           rg="${pool[$idx]}"
           echo "Selected run RG: $rg (pool size ${#pool[@]}, week $week)"
