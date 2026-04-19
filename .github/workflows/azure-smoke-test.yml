@@ -1,0 +1,133 @@
+name: Azure Smoke Test
+
+# ---------------------------------------------------------------------------
+# End-to-end smoke test for the latest published VHD:
+#   1. pick one of the perpetual run RGs from the pool
+#   2. deploy the latest released VHD as a VM in that RG
+#   3. SSH to the VM and assert the NixOS version string
+#   4. tear the RG down to *empty* (not deleted — see docs/ci-azure.md)
+#
+# Teardown is done with a complete-mode deployment of an empty template so
+# that ARM computes the delete DAG itself (disks before NICs before VNets,
+# etc.).  Up to 3 attempts with 60s backoff handle transient ARM errors
+# (~20% observed failure rate on the first try).  After retries, the RG is
+# verified empty; if not, the job fails loudly and the janitor workflow
+# will re-attempt cleanup on its next scheduled run.
+# ---------------------------------------------------------------------------
+
+on:
+  schedule:
+    # Saturday 18:00 UTC (≈ Sat night US Central)
+    - cron: "0 18 * * 6"
+  workflow_dispatch:
+
+permissions:
+  id-token: write      # OIDC federation to Azure
+  contents: read
+
+concurrency:
+  group: azure-smoke-test
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: Deploy latest VHD and smoke-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id:       ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id:       ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Pick a run RG from the pool based on the ISO week number so the
+      # same RG isn't hammered every week and we exercise both slots.
+      - name: Select run RG from pool
+        id: pick
+        env:
+          AZURE_RUN_RGS: ${{ vars.AZURE_RUN_RGS }}
+        run: |
+          set -eu
+          read -r -a pool <<< "$AZURE_RUN_RGS"
+          if [ "${#pool[@]}" -eq 0 ]; then
+            echo "AZURE_RUN_RGS variable is empty" >&2
+            exit 1
+          fi
+          week=$(date -u +%V)
+          # `10#` forces base-10 parsing; ISO week numbers like "08"/"09"
+          # would otherwise be treated as invalid octal by bash arithmetic.
+          idx=$(( 10#$week % ${#pool[@]} ))
+          rg="${pool[$idx]}"
+          echo "Selected run RG: $rg (pool size ${#pool[@]}, week $week)"
+          echo "rg=$rg" >> "$GITHUB_OUTPUT"
+
+      # --- actual deploy + smoke test would go here ---------------------
+      # Intentionally kept as a placeholder: this PR's focus is the
+      # teardown safety net, and writing a full VHD-upload / VM-create
+      # path requires decisions (managed image vs shared gallery, VM
+      # size, network topology) that belong in a follow-up.
+      - name: Smoke test (placeholder)
+        env:
+          RG: ${{ steps.pick.outputs.rg }}
+        run: |
+          echo "Would deploy latest VHD into $RG and SSH-smoke-test it here."
+          echo "For now we just prove RBAC works by listing the RG:"
+          az group show -n "$RG" -o table
+
+      # -----------------------------------------------------------------
+      # Layer 1 — complete-mode teardown with retry + backoff.
+      # The empty template tells ARM "the desired state of this RG is
+      # nothing"; ARM deletes every resource in dependency order.
+      # Role assignments on the RG itself are untouched because the
+      # RG is not deleted.
+      # -----------------------------------------------------------------
+      - name: Teardown run RG (complete-mode, with retry)
+        if: always()
+        env:
+          RG: ${{ steps.pick.outputs.rg }}
+        run: |
+          set -u
+          ok=0
+          for attempt in 1 2 3; do
+            echo "::group::Teardown attempt ${attempt}"
+            if az deployment group create \
+                 --resource-group "$RG" \
+                 --name "teardown-$(date -u +%Y%m%d-%H%M%S)" \
+                 --mode Complete \
+                 --template-file scripts/azure/empty-rg.json; then
+              echo "Attempt ${attempt} succeeded"
+              ok=1
+              echo "::endgroup::"
+              break
+            fi
+            echo "Attempt ${attempt} failed"
+            echo "::endgroup::"
+            sleep 60
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::warning::All 3 teardown attempts failed for $RG"
+          fi
+
+      # -----------------------------------------------------------------
+      # Layer 2 — verify RG is actually empty. Fails the job loudly if
+      # not, which surfaces as a red workflow → GitHub notifies you.
+      # -----------------------------------------------------------------
+      - name: Verify run RG is empty
+        if: always()
+        env:
+          RG: ${{ steps.pick.outputs.rg }}
+        run: |
+          set -eu
+          remaining=$(az resource list -g "$RG" --query "length(@)" -o tsv)
+          echo "Resources remaining in $RG: $remaining"
+          if [ "$remaining" -ne 0 ]; then
+            az resource list -g "$RG" -o table || true
+            echo "::error::Run RG $RG is not empty after teardown (remaining=$remaining). Janitor will retry."
+            exit 1
+          fi
