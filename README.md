@@ -16,6 +16,49 @@ build a ready-to-deploy NixOS `.vhd` image every Saturday at 00:00 US Central
 Standard Time (06:00 UTC).  The resulting image is uploaded as a GitHub Release
 tagged with the build timestamp (`YYYYMMDD-HHMM`).
 
+---
+
+## Image features
+
+Out of the box the generated VHD gives you:
+
+* **Azure-ready boot.** Built with the nixos-generators `azure` format, which
+  configures the kernel, bootloader and disk layout for Azure's Hyper-V host
+  and ships the **Microsoft Azure Linux Agent (`waagent`)** so the VM
+  provisions correctly (hostname, SSH keys, resource disk, serial console,
+  heartbeat / health to the Azure fabric).
+* **Hardened OpenSSH.** `services.openssh` is enabled with
+  `PasswordAuthentication = false` and `PermitRootLogin = no` — the only way
+  in is via the SSH public keys you add in `core_pulse.nix`.
+* **Ready-to-use default user.** A `nixos` user in the `wheel` and
+  `networkmanager` groups with passwordless `sudo` (handy for
+  automation / CI/CD), pinned to your SSH keys.
+* **Sensible base toolchain.** `git`, `curl`, `wget`, `htop` and `vim` are
+  preinstalled; extend the list in `core_pulse.nix` with anything else you
+  need.
+* **UTC / en_US.UTF-8 defaults** for predictable log timestamps and locale
+  behaviour in automation.
+* **Reproducible, pinned builds.** The Nix flake pins
+  `nixpkgs` to `nixos-unstable`, so every weekly release is fully
+  reproducible from the tagged commit.
+* **Automated weekly releases.** The `weekly_forge` GitHub Actions workflow
+  rebuilds the image every Saturday and publishes a gzip-compressed VHD as a
+  GitHub Release (`YYYYMMDD-HHMM`).
+* **Optional Azure CI safety net.** If you run the one-time Azure bootstrap
+  (see below), the `azure-smoke-test` and `azure-janitor` workflows will
+  deploy the latest VHD end-to-end and sweep stale run resource groups. Forks
+  that skip the bootstrap simply skip these workflows — the image itself
+  builds and releases without any Azure credentials.
+
+> Additional agents such as the **Azure Monitor Agent**, Log Analytics
+> extensions, or other VM extensions are not baked into the image; install
+> them either as Azure VM extensions at deploy time, or by adding the
+> corresponding NixOS modules / packages to `core_pulse.nix` before building.
+
+---
+
+## Repository layout
+
 ```
 nixos-azure-builder/
 ├── flake.nix                        # Nix Flake entry-point — defines the azureImage output

@@ -36,6 +36,13 @@ jobs:
     runs-on: ubuntu-latest
     environment: azure-janitor   # matches federated credential subject
     timeout-minutes: 30
+    # Only run when Azure has been bootstrapped for this repo (see README →
+    # "Azure CI setup"). Without the run-RG pool configured, the OIDC login
+    # has nothing to authenticate against and the job would fail every day.
+    # Forks that haven't run the bootstrap script skip this job cleanly,
+    # mirroring how the weekly_forge build pipeline is self-contained and
+    # doesn't require any Azure wiring to succeed.
+    if: ${{ vars.AZURE_RUN_RGS != '' }}
 
     steps:
       - name: Checkout repository
