@@ -30,15 +30,36 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Tiny preflight that exposes "is Azure configured for this repo?" as a
+  # job output. We gate on a *secret* (AZURE_SUBSCRIPTION_ID) because that
+  # is the single mandatory input set by the bootstrap script; however
+  # GitHub does not allow `secrets.*` in job-level `if:` expressions, so we
+  # have to route it through `needs.<job>.outputs.*`. Forks that haven't
+  # run the bootstrap skip the real job cleanly with a friendly notice.
+  preflight:
+    name: Preflight — is Azure configured?
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - id: check
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          if [ -n "${AZURE_SUBSCRIPTION_ID:-}" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Azure not configured — skipping. See README → Azure CI setup."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
   smoke:
     name: Deploy latest VHD and smoke-test
     runs-on: ubuntu-latest
+    needs: preflight
+    if: needs.preflight.outputs.configured == 'true'
     timeout-minutes: 60
-    # Only run when Azure has been bootstrapped for this repo (see README →
-    # "Azure CI setup"). Forks that haven't run the bootstrap script skip
-    # this job cleanly; the weekly_forge image build is self-contained and
-    # doesn't require any Azure wiring to succeed.
-    if: ${{ vars.AZURE_RUN_RGS != '' }}
 
     steps:
       - name: Checkout repository

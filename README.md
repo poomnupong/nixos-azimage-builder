@@ -52,8 +52,78 @@ Out of the box the generated VHD gives you:
 
 > Additional agents such as the **Azure Monitor Agent**, Log Analytics
 > extensions, or other VM extensions are not baked into the image; install
-> them either as Azure VM extensions at deploy time, or by adding the
-> corresponding NixOS modules / packages to `core_pulse.nix` before building.
+> them either as Azure VM extensions at deploy time (recommended — see
+> [Observability (optional)](#observability-optional) below) or by adding
+> the corresponding NixOS modules / packages to `core_pulse.nix` before
+> building.
+
+---
+
+## Azure compliance & provisioning model
+
+The image is configured to match Microsoft's
+[Prepare a Linux VHD for Azure](https://learn.microsoft.com/azure/virtual-machines/linux/create-upload-generic)
+checklist out of the box — you should not normally need to add anything to
+`core_pulse.nix` for it to be Azure-compliant.
+
+| Checklist item | Where it comes from |
+|---|---|
+| **Azure Linux Agent (`waagent`) — the VM guest agent Azure requires** | `services.waagent.enable = true` in upstream `azure-common.nix` |
+| **cloud-init** enabled for provisioning (SSH host keys, user injection, network) | `services.cloud-init.enable = true` in upstream `azure-common.nix` |
+| Serial console on `ttyS0` @ 115200 baud | kernel params in `azure-common.nix` |
+| Hyper-V kernel modules (`hv_vmbus`, `hv_netvsc`, `hv_utils`, `hv_storvsc`) in initrd | `boot.initrd.kernelModules` in `azure-common.nix` |
+| Non-predictable interface names + systemd-networkd (safe to clone) | `networking.usePredictableInterfaceNames = false` |
+| Hostname sourced from Azure metadata | `networking.hostName = lib.mkDefault ""` |
+| Resource-disk handling deferred to cloud-init | waagent `Provisioning.Enable = !cloud-init.enable` default |
+
+**Provisioning split.** On this image, **cloud-init** performs first-boot
+provisioning (SSH host keys, user injection, network config) and **waagent**
+handles the Azure-specific side (heartbeat to the fabric, extension
+execution, Azure metadata integration). This is the modern Microsoft-endorsed
+pattern for Linux images on Azure; waagent auto-disables its own provisioning
+path (`Provisioning.Enable` defaults to `!cloud-init.enable`) so the two
+don't collide. If you need to opt out of cloud-init (rare — typically only
+for offline/air-gapped builds), override with
+`services.cloud-init.enable = lib.mkForce false;` in `core_pulse.nix`; waagent
+will then do provisioning itself.
+
+---
+
+## Observability (optional)
+
+The **Azure Monitor Agent (AMA)** is frequently confused with the VM guest
+agent, but they are different things:
+
+* **waagent** is the *guest agent* Azure requires. It's already in the image
+  (see above) — you don't need to do anything.
+* **AMA** is a *VM extension* for metrics/logs ingestion into Log Analytics.
+  It is **not** baked into this image on purpose: VM extensions auto-update
+  out-of-band, which would defeat the deterministic-image goal.
+
+The recommended deterministic way to install AMA is to declare it at deploy
+time with a **pinned `typeHandlerVersion`** and
+**`autoUpgradeMinorVersion: false`**, so you decide when to roll a new
+version, e.g. as part of your ARM/Bicep/Terraform template:
+
+```json
+{
+  "type": "Microsoft.Compute/virtualMachines/extensions",
+  "apiVersion": "2023-09-01",
+  "name": "[concat(parameters('vmName'), '/AzureMonitorLinuxAgent')]",
+  "location": "[parameters('location')]",
+  "properties": {
+    "publisher": "Microsoft.Azure.Monitor",
+    "type": "AzureMonitorLinuxAgent",
+    "typeHandlerVersion": "1.33",
+    "autoUpgradeMinorVersion": false,
+    "enableAutomaticUpgrade": false,
+    "settings": {}
+  }
+}
+```
+
+The same pattern applies to other Microsoft-published extensions (Custom
+Script, Dependency Agent, Disk Encryption, etc.).
 
 ---
 
