@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# bootstrap-azure-ci.sh — one-time Azure setup for nixos-azure-builder CI.
+# bootstrap-azure-ci.sh — one-time Azure setup for nixos-azimage-builder CI.
 #
 # Creates:
 #   * a *control* resource group (perpetual, holds shared state such as
@@ -20,12 +20,12 @@
 #   ./scripts/bootstrap-azure-ci.sh \
 #       --subscription <sub-id> \
 #       --location southeastasia \
-#       --github-repo poomnupong/nixos-azure-builder \
+#       --github-repo poomnupong/nixos-azimage-builder \
 #       --budget-email you@example.com \
 #       [--run-rg-count 2] \
 #       [--control-rg rg-nixos-ci-control] \
 #       [--run-rg-prefix rg-nixos-ci-run] \
-#       [--sp-name sp-nixos-azure-builder-ci] \
+#       [--sp-name sp-nixos-azimage-builder-ci] \
 #       [--budget-amount 10]
 #
 # The script is idempotent — re-running it is safe and will reconcile
@@ -40,7 +40,7 @@ BUDGET_EMAIL=""
 RUN_RG_COUNT=2
 CONTROL_RG="rg-nixos-ci-control"
 RUN_RG_PREFIX="rg-nixos-ci-run"
-SP_NAME="sp-nixos-azure-builder-ci"
+SP_NAME="sp-nixos-azimage-builder-ci"
 BUDGET_AMOUNT=10
 
 while [[ $# -gt 0 ]]; do

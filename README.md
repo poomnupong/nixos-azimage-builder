@@ -1,4 +1,4 @@
-# nixos-azure-builder
+# nixos-azimage-builder
 
 > **Non-Profit / Reference Use.**  
 > This repository is provided as a reference implementation for building
@@ -17,7 +17,7 @@ Standard Time (06:00 UTC).  The resulting image is uploaded as a GitHub Release
 tagged with the build timestamp (`YYYYMMDD-HHMM`).
 
 ```
-nixos-azure-builder/
+nixos-azimage-builder/
 ├── flake.nix                        # Nix Flake entry-point — defines the azureImage output
 ├── core_pulse.nix                   # ← YOUR customisation module (packages, users, SSH keys)
 ├── get_version.sh                   # Generates the YYYYMMDD-HHMM version / release tag
@@ -123,12 +123,12 @@ OIDC trust between GitHub and Azure:
 |------|------------|---------------|
 | `--subscription` | The Azure subscription ID the RGs will live in. | `az account show --query id -o tsv` |
 | `--location` | Azure region for the resource groups (e.g. `southeastasia`, `eastus`). | Pick any region close to you; it only affects the RG metadata and where the smoke-test VM will run. |
-| `--github-repo` | Your GitHub repo in `owner/name` form. **Must match exactly** — it becomes the `sub` claim the OIDC token is validated against. | e.g. `poomnupong/nixos-azure-builder` (or `yourname/your-fork`). |
+| `--github-repo` | Your GitHub repo in `owner/name` form. **Must match exactly** — it becomes the `sub` claim the OIDC token is validated against. | e.g. `poomnupong/nixos-azimage-builder` (or `yourname/your-fork`). |
 | `--budget-email` | Email address for the Layer-4 budget alert (80% of monthly spend). | Any mailbox you check. |
 | `--run-rg-count` *(optional)* | How many run resource groups to create (default `2`). | Two is enough; increase only if smoke tests overlap. |
 | `--control-rg` *(optional)* | Name of the shared control RG (default `rg-nixos-ci-control`). | |
 | `--run-rg-prefix` *(optional)* | Prefix for the run RG names (default `rg-nixos-ci-run`, yielding `rg-nixos-ci-run-01`, `-02`, …). | |
-| `--sp-name` *(optional)* | Display name of the service principal (default `sp-nixos-azure-builder-ci`). | |
+| `--sp-name` *(optional)* | Display name of the service principal (default `sp-nixos-azimage-builder-ci`). | |
 | `--budget-amount` *(optional)* | Monthly budget in USD (default `10`). | |
 
 The script is **idempotent** — re-running it reconciles state instead of
@@ -140,7 +140,7 @@ creating duplicates.
 ./scripts/bootstrap-azure-ci.sh \
   --subscription <sub-id> \
   --location southeastasia \
-  --github-repo <your-gh-user>/nixos-azure-builder \
+  --github-repo <your-gh-user>/nixos-azimage-builder \
   --budget-email you@example.com
 ```
 
