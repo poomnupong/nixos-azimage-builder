@@ -26,6 +26,7 @@
 #       [--control-rg rg-nixos-ci-control] \
 #       [--run-rg-prefix rg-nixos-ci-run] \
 #       [--sp-name sp-nixos-azimage-builder-ci] \
+#       [--staging-sa stnixoscistgXXXXXX] \
 #       [--budget-amount 10]
 #
 # The script is idempotent — re-running it is safe and will reconcile
@@ -41,6 +42,7 @@ RUN_RG_COUNT=2
 CONTROL_RG="rg-nixos-ci-control"
 RUN_RG_PREFIX="rg-nixos-ci-run"
 SP_NAME="sp-nixos-azimage-builder-ci"
+STAGING_SA=""
 BUDGET_AMOUNT=10
 
 while [[ $# -gt 0 ]]; do
@@ -53,6 +55,7 @@ while [[ $# -gt 0 ]]; do
     --control-rg)      CONTROL_RG="$2"; shift 2 ;;
     --run-rg-prefix)   RUN_RG_PREFIX="$2"; shift 2 ;;
     --sp-name)         SP_NAME="$2"; shift 2 ;;
+    --staging-sa)      STAGING_SA="$2"; shift 2 ;;
     --budget-amount)   BUDGET_AMOUNT="$2"; shift 2 ;;
     -h|--help)
       sed -n '2,34p' "$0"; exit 0 ;;
@@ -136,6 +139,47 @@ az role assignment create --assignee-object-id "$SP_OBJECT_ID" \
   --scope "/subscriptions/$SUBSCRIPTION/resourceGroups/$CONTROL_RG" >/dev/null || true
 
 # ---------------------------------------------------------------------------
+# 3b. Staging storage account in the control RG.
+#     The smoke-test workflow uploads the latest released VHD here so that
+#     `az image create` can read it. The SP needs Storage Blob Data
+#     Contributor on this account (data-plane RBAC, not just control plane).
+#     Reused across runs; idempotent via tag lookup.
+# ---------------------------------------------------------------------------
+if [[ -z "$STAGING_SA" ]]; then
+  STAGING_SA=$(az storage account list -g "$CONTROL_RG" \
+    --query "[?tags.role=='staging']|[0].name" -o tsv 2>/dev/null || true)
+fi
+if [[ -z "$STAGING_SA" ]]; then
+  # Storage account names: 3-24 lowercase alphanumeric, globally unique.
+  STAGING_SA="stnixoscistg$(openssl rand -hex 5)"
+fi
+echo "==> Ensuring staging storage account '$STAGING_SA' in $CONTROL_RG"
+if ! az storage account show -n "$STAGING_SA" -g "$CONTROL_RG" >/dev/null 2>&1; then
+  az storage account create \
+    --name "$STAGING_SA" \
+    --resource-group "$CONTROL_RG" \
+    --location "$LOCATION" \
+    --sku Standard_LRS \
+    --kind StorageV2 \
+    --access-tier Hot \
+    --allow-blob-public-access false \
+    --min-tls-version TLS1_2 \
+    --tags purpose=nixos-ci role=staging >/dev/null
+fi
+
+echo "==> Ensuring blob container 'vhds' on $STAGING_SA"
+az storage container create \
+  --account-name "$STAGING_SA" \
+  --name vhds \
+  --auth-mode key >/dev/null 2>&1 || true
+
+echo "==> Granting SP 'Storage Blob Data Contributor' on $STAGING_SA"
+SA_SCOPE=$(az storage account show -n "$STAGING_SA" -g "$CONTROL_RG" --query id -o tsv)
+az role assignment create --assignee-object-id "$SP_OBJECT_ID" \
+  --assignee-principal-type ServicePrincipal \
+  --role "Storage Blob Data Contributor" --scope "$SA_SCOPE" >/dev/null || true
+
+# ---------------------------------------------------------------------------
 # 4. Budget alert — Layer-4 backstop: if everything else leaks, this emails.
 # ---------------------------------------------------------------------------
 echo "==> Ensuring subscription budget 'nixos-ci-budget' ($BUDGET_AMOUNT USD/month)"
@@ -173,6 +217,7 @@ Bootstrap complete. Configure these in GitHub repo settings:
     AZURE_LOCATION        = $LOCATION
     AZURE_CONTROL_RG      = $CONTROL_RG
     AZURE_RUN_RGS         = ${RUN_RGS[*]}
+    AZURE_STAGING_SA      = $STAGING_SA
 
 Also create an Actions environment named 'azure-janitor' (used by the
 janitor workflow's federated credential subject).

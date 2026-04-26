@@ -43,6 +43,8 @@ jobs:
           AZURE_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_RUN_RGS:         ${{ vars.AZURE_RUN_RGS }}
+          AZURE_CONTROL_RG:      ${{ vars.AZURE_CONTROL_RG }}
+          AZURE_STAGING_SA:      ${{ vars.AZURE_STAGING_SA }}
         run: |
           set -u
           missing=()
@@ -50,6 +52,8 @@ jobs:
           [ -n "${AZURE_TENANT_ID:-}" ]       || missing+=("secret AZURE_TENANT_ID")
           [ -n "${AZURE_SUBSCRIPTION_ID:-}" ] || missing+=("secret AZURE_SUBSCRIPTION_ID")
           [ -n "${AZURE_RUN_RGS:-}" ]         || missing+=("var AZURE_RUN_RGS")
+          [ -n "${AZURE_CONTROL_RG:-}" ]      || missing+=("var AZURE_CONTROL_RG")
+          [ -n "${AZURE_STAGING_SA:-}" ]      || missing+=("var AZURE_STAGING_SA")
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "::notice::Azure CI is not bootstrapped — skipping. Missing: ${missing[*]}. Run scripts/bootstrap-azure-ci.sh to configure."
             echo "ok=false" >> "$GITHUB_OUTPUT"
@@ -87,19 +91,212 @@ jobs:
           echo "Selected run RG: $rg (pool size ${#pool[@]}, week $week)"
           echo "rg=$rg" >> "$GITHUB_OUTPUT"
 
-      # --- actual deploy + smoke test would go here ---------------------
-      # Intentionally kept as a placeholder: this PR's focus is the
-      # teardown safety net, and writing a full VHD-upload / VM-create
-      # path requires decisions (managed image vs shared gallery, VM
-      # size, network topology) that belong in a follow-up.
-      - name: Smoke test (placeholder)
+      # --- actual deploy + smoke test --------------------------------------
+      # Pull the latest released VHD, push it through Azure as a Managed
+      # Image, boot a tiny B1s VM from it locked down to the runner's IP,
+      # SSH in, and assert NixOS booted. Cost per run: well under $0.10.
+      - name: Resolve latest release
+        if: steps.preflight.outputs.ok == 'true'
+        id: rel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag=$(gh release list --limit 1 --json tagName -q '.[0].tagName')
+          if [ -z "$tag" ]; then
+            echo "::error::No GitHub Releases found — has Weekly Forge run yet?"
+            exit 1
+          fi
+          asset="nixos-azimage-${tag}.vhd.gz"
+          url=$(gh release view "$tag" --json assets \
+            -q ".assets[] | select(.name==\"$asset\") | .url")
+          if [ -z "$url" ]; then
+            echo "::error::Release $tag has no asset named $asset"
+            exit 1
+          fi
+          echo "tag=$tag"     >> "$GITHUB_OUTPUT"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+          echo "url=$url"     >> "$GITHUB_OUTPUT"
+          echo "vhd=nixos-azimage-${tag}.vhd" >> "$GITHUB_OUTPUT"
+
+      - name: Stage VHD in Azure (idempotent upload)
+        if: steps.preflight.outputs.ok == 'true'
+        id: stage
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SA:    ${{ vars.AZURE_STAGING_SA }}
+          TAG:   ${{ steps.rel.outputs.tag }}
+          ASSET: ${{ steps.rel.outputs.asset }}
+          VHD:   ${{ steps.rel.outputs.vhd }}
+        run: |
+          set -euo pipefail
+          # Skip download/upload if the blob already exists (re-runs on the
+          # same release should be cheap).
+          exists=$(az storage blob exists \
+            --account-name "$SA" --container-name vhds --name "$VHD" \
+            --auth-mode login --query exists -o tsv)
+          if [ "$exists" = "true" ]; then
+            echo "blob $VHD already staged — skipping upload"
+          else
+            echo "downloading $ASSET from latest release"
+            gh release download "$TAG" --pattern "$ASSET" --output "$ASSET"
+            echo "decompressing"
+            gunzip "$ASSET"
+            ls -lh "$VHD"
+            echo "uploading to $SA/vhds/$VHD"
+            az storage blob upload \
+              --account-name "$SA" --container-name vhds --name "$VHD" \
+              --file "$VHD" --auth-mode login --overwrite false
+            rm -f "$VHD"
+          fi
+          echo "blob_url=https://${SA}.blob.core.windows.net/vhds/${VHD}" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Create Managed Image from staged VHD
+        if: steps.preflight.outputs.ok == 'true'
+        id: image
+        env:
+          RG:       ${{ steps.pick.outputs.rg }}
+          TAG:      ${{ steps.rel.outputs.tag }}
+          BLOB_URL: ${{ steps.stage.outputs.blob_url }}
+        run: |
+          set -euo pipefail
+          IMG="smoke-img-${TAG}"
+          # Idempotent: if the image already exists in this RG, reuse it.
+          if ! az image show -g "$RG" -n "$IMG" >/dev/null 2>&1; then
+            az image create -g "$RG" -n "$IMG" \
+              --os-type Linux \
+              --hyper-v-generation V2 \
+              --source "$BLOB_URL" >/dev/null
+          fi
+          echo "image=$IMG" >> "$GITHUB_OUTPUT"
+
+      - name: Generate ephemeral SSH keypair
+        if: steps.preflight.outputs.ok == 'true'
+        id: ssh
+        run: |
+          set -euo pipefail
+          d=$(mktemp -d)
+          chmod 700 "$d"
+          ssh-keygen -t ed25519 -N '' -C 'nixos-ci-smoke' -f "$d/id" >/dev/null
+          chmod 600 "$d/id"
+          echo "dir=$d" >> "$GITHUB_OUTPUT"
+
+      - name: Determine runner public IP
+        if: steps.preflight.outputs.ok == 'true'
+        id: ip
+        run: |
+          set -euo pipefail
+          ip=$(curl -fsS --retry 3 https://api.ipify.org)
+          # Sanity check: must look like an IPv4.
+          if ! echo "$ip" | grep -Eq '^[0-9.]+$'; then
+            echo "::error::Unexpected runner IP: $ip"
+            exit 1
+          fi
+          echo "runner_ip=$ip" >> "$GITHUB_OUTPUT"
+
+      - name: Create locked-down NSG
         if: steps.preflight.outputs.ok == 'true'
         env:
-          RG: ${{ steps.pick.outputs.rg }}
+          RG:        ${{ steps.pick.outputs.rg }}
+          RUNNER_IP: ${{ steps.ip.outputs.runner_ip }}
         run: |
-          echo "Would deploy latest VHD into $RG and SSH-smoke-test it here."
-          echo "For now we just prove RBAC works by listing the RG:"
-          az group show -n "$RG" -o table
+          set -euo pipefail
+          az network nsg create -g "$RG" -n smoke-nsg -l "${{ vars.AZURE_LOCATION }}" >/dev/null
+          az network nsg rule create -g "$RG" --nsg-name smoke-nsg \
+            --name allow-ssh-from-runner --priority 1000 \
+            --source-address-prefixes "${RUNNER_IP}/32" \
+            --destination-port-ranges 22 \
+            --access Allow --protocol Tcp --direction Inbound >/dev/null
+
+      - name: Create smoke-test VM
+        if: steps.preflight.outputs.ok == 'true'
+        id: vm
+        env:
+          RG:    ${{ steps.pick.outputs.rg }}
+          IMG:   ${{ steps.image.outputs.image }}
+          SSH_DIR: ${{ steps.ssh.outputs.dir }}
+        run: |
+          set -euo pipefail
+          az vm create -g "$RG" -n smoke-vm \
+            --image "$IMG" \
+            --size Standard_B1s \
+            --admin-username azureuser \
+            --ssh-key-values "$SSH_DIR/id.pub" \
+            --public-ip-sku Standard \
+            --nsg smoke-nsg \
+            --output none
+          ip=$(az vm show -d -g "$RG" -n smoke-vm --query publicIps -o tsv)
+          if [ -z "$ip" ]; then
+            echo "::error::VM has no public IP"
+            exit 1
+          fi
+          echo "public_ip=$ip" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for SSH on VM
+        if: steps.preflight.outputs.ok == 'true'
+        env:
+          IP: ${{ steps.vm.outputs.public_ip }}
+        run: |
+          set -u
+          for i in $(seq 1 30); do
+            if nc -z -w 5 "$IP" 22; then
+              echo "SSH reachable after $i attempt(s)"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::SSH never came up on $IP after 5 minutes"
+          exit 1
+
+      - name: SSH and assert NixOS
+        if: steps.preflight.outputs.ok == 'true'
+        id: assert
+        env:
+          IP:      ${{ steps.vm.outputs.public_ip }}
+          SSH_DIR: ${{ steps.ssh.outputs.dir }}
+        run: |
+          set -euo pipefail
+          out=$(ssh \
+            -i "$SSH_DIR/id" \
+            -o StrictHostKeyChecking=accept-new \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            -o IdentitiesOnly=yes \
+            "azureuser@${IP}" \
+            'cat /etc/os-release; echo ---; nixos-version')
+          echo "$out"
+          echo "$out" | grep -Eq '^ID=nixos$' \
+            || { echo "::error::/etc/os-release does not declare ID=nixos"; exit 1; }
+          nv=$(echo "$out" | awk '/^---$/{flag=1;next} flag' | head -n1)
+          if [ -z "$nv" ]; then
+            echo "::error::nixos-version returned empty output"
+            exit 1
+          fi
+          echo "nixos_version=$nv" >> "$GITHUB_OUTPUT"
+
+      - name: Job summary
+        if: always() && steps.preflight.outputs.ok == 'true'
+        env:
+          TAG:     ${{ steps.rel.outputs.tag }}
+          IMG:     ${{ steps.image.outputs.image }}
+          IP:      ${{ steps.vm.outputs.public_ip }}
+          NV:      ${{ steps.assert.outputs.nixos_version }}
+          RG:      ${{ steps.pick.outputs.rg }}
+        run: |
+          {
+            echo "### Smoke test summary"
+            echo
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Release tag | \`${TAG:-?}\` |"
+            echo "| Managed image | \`${IMG:-?}\` |"
+            echo "| Run RG | \`${RG:-?}\` |"
+            # Redact last octet of public IP.
+            ipred=$(echo "${IP:-}" | sed -E 's/\.[0-9]+$/.x/')
+            echo "| VM public IP | \`${ipred:-?}\` |"
+            echo "| nixos-version | \`${NV:-?}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # -----------------------------------------------------------------
       # Layer 1 — complete-mode teardown with retry + backoff.
