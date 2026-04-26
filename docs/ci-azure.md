@@ -10,8 +10,10 @@ We use **one control RG + a small pool of dedicated run RGs**:
 
 ```
 subscription
-├── rg-nixos-ci-control       ← perpetual; shared state (future: staging
-│                                storage, budget action group, etc.)
+├── rg-nixos-ci-control       ← perpetual; staging storage account, budget
+│                                action group, etc.
+│     └── stnixoscistg<rand>   ← staging SA, container 'vhds' holds the
+│                                VHD that the smoke test deploys from
 ├── rg-nixos-ci-run-01        ← perpetual *container*; emptied after each run
 └── rg-nixos-ci-run-02        ← perpetual *container*; emptied after each run
 ```
@@ -78,9 +80,12 @@ The script:
    GitHub OIDC — no client secrets ever land in the repo.
 3. Grants the SP `Contributor` on each run RG and `Reader` on the
    control RG.
-4. Creates a monthly subscription budget with an email action group
+4. Creates the **staging storage account** in the control RG and
+   grants the SP `Storage Blob Data Contributor` on it (data-plane
+   RBAC, needed so the workflow can upload the VHD blob).
+5. Creates a monthly subscription budget with an email action group
    (Layer 4).
-5. Prints the GitHub secrets and variables you need to set.
+6. Prints the GitHub secrets and variables you need to set.
 
 ### Required GitHub configuration
 
@@ -96,6 +101,8 @@ The script:
 * `AZURE_CONTROL_RG` — e.g. `rg-nixos-ci-control`
 * `AZURE_RUN_RGS` — space-separated list, e.g.
   `rg-nixos-ci-run-01 rg-nixos-ci-run-02`
+* `AZURE_STAGING_SA` — staging storage account name (printed by the
+  bootstrap script)
 
 **Environment**: create a GitHub Actions environment called
 `azure-janitor`. Its subject is referenced by the SP's federated
@@ -112,11 +119,30 @@ credential, so the janitor workflow can obtain an OIDC token.
    backup items with soft-delete?). Fix the underlying cause and
    close the issue. The janitor will re-open on the next failure.
 
-## Not in scope for this PR
+## Smoke-test flow
 
-The smoke-test workflow currently contains a placeholder for the
-actual "deploy VHD + SSH smoke test" step. Writing that requires
-decisions about VHD staging (storage account vs shared image
-gallery), VM size, and network topology, all of which belong in a
-follow-up change. The teardown safety net — the actual ask — is
-complete and useful on its own.
+The weekly smoke test exercises the full release pipeline end-to-end:
+
+1. **Resolve latest release.** `gh release list/view` finds the most
+   recent tag and the matching `nixos-azimage-<tag>.vhd.gz` asset.
+2. **Stage VHD.** Download + decompress on the runner, then upload to
+   `vhds/nixos-azimage-<tag>.vhd` on the staging SA. The upload is
+   skipped if a blob with that exact name already exists, so re-runs
+   on the same release are cheap.
+3. **Create Managed Image.** `az image create` from the blob URL into
+   the selected run RG (`hyper-v-generation V2`, `os-type Linux`).
+4. **Boot VM.** A `Standard_B1s` VM is created from the image with an
+   ephemeral ed25519 SSH key generated on the runner. Inbound SSH is
+   restricted by NSG to the runner's egress IP only.
+5. **Assert.** SSH in, run `cat /etc/os-release` and `nixos-version`,
+   and require `ID=nixos` plus a non-empty version string.
+6. **Teardown.** Existing complete-mode empty-template deployment
+   wipes every resource (VM, disk, NIC, NSG, public IP, VNet,
+   image) but leaves the run RG and its role assignments intact.
+
+Cost per run: well under $0.10 — a B1s VM lives <15 minutes, and
+the staging blob (~1 GB) costs cents per month at LRS hot tier.
+
+VHD blobs accumulate one per release. To keep storage bounded, set
+a lifecycle policy on the staging SA (e.g. delete blobs older than
+60 days) — not yet automated.
