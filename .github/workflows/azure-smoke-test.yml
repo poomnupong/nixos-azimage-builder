@@ -20,6 +20,13 @@ on:
     # Saturday 18:00 UTC (≈ Sat night US Central)
     - cron: "0 18 * * 6"
   workflow_dispatch:
+  # TEMPORARY: branch-scoped push trigger used while iteratively
+  # diagnosing+fixing the smoke test on the PR branch. This block
+  # MUST be removed before merging to main so that main keeps its
+  # "schedule + manual" semantics.
+  push:
+    branches:
+      - copilot/diagnose-fix-smoke-test-issues
 
 permissions:
   id-token: write      # OIDC federation to Azure
@@ -142,6 +149,14 @@ jobs:
           VHD:   ${{ steps.rel.outputs.vhd }}
         run: |
           set -euo pipefail
+          # Self-heal: make sure the staging container exists. The
+          # bootstrap script creates it, but it can get deleted out of
+          # band (manual cleanup, lifecycle policy, etc.). Recreating
+          # it here is idempotent and keeps the smoke test resilient
+          # without requiring a re-run of bootstrap-azure-ci.sh.
+          az storage container create \
+            --account-name "$SA" --name vhds \
+            --auth-mode login >/dev/null
           # Skip download/upload if the blob already exists (re-runs on the
           # same release should be cheap).
           exists=$(az storage blob exists \
