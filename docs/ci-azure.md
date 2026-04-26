@@ -1,6 +1,6 @@
 # Azure CI — architecture and operations
 
-This document describes the Azure side of the **nixos-azure-builder** CI:
+This document describes the Azure side of the **nixos-azimage-builder** CI:
 the resource-group layout, why RBAC survives between runs, how teardown
 failures are handled, and the one-time setup.
 
@@ -67,7 +67,7 @@ Run the bootstrap script **locally, once**, as a subscription Owner:
 ./scripts/bootstrap-azure-ci.sh \
   --subscription <sub-id> \
   --location southeastasia \
-  --github-repo poomnupong/nixos-azure-builder \
+  --github-repo poomnupong/nixos-azimage-builder \
   --budget-email you@example.com
 ```
 
