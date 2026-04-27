@@ -361,11 +361,11 @@ jobs:
           SSH_DIR: ${{ steps.ssh.outputs.dir }}
         run: |
           set -euo pipefail
-          # SCSI+NVMe drivers are both in the initrd via core_pulse.nix,
-          # so the image can boot under either controller. Standard_D16ads_v7
-          # is what's available in the target subscription; the v7 AMD
-          # series is NVMe-only, so we pin --disk-controller-type NVMe to
-          # match the SKU.
+          # The image includes both SCSI and NVMe drivers in the initrd via
+          # core_pulse.nix, but this smoke test currently boots a
+          # Standard_D16ads_v7 VM. That v7 AMD SKU is what's available in the
+          # target subscription and is NVMe-only, so we intentionally pin
+          # --disk-controller-type NVMe to match the selected VM size.
           az vm create -g "$RG" -n smoke-vm \
             --image "$IMG" \
             --size Standard_D16ads_v7 \
