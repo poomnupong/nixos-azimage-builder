@@ -122,7 +122,7 @@ jobs:
             echo "::error::gh call failed after 3 attempts: $*" >&2
             return 1
           }
-          tag=$(gh_retry gh release list --limit 1 --json tagName -q '.[0].tagName')
+          tag=$(gh_retry gh release list --limit 1 --json tagName -q '.[0].tagName // empty')
           if [ -z "$tag" ]; then
             echo "::error::No GitHub Releases found — has Weekly Forge run yet?"
             exit 1
