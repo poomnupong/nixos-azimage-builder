@@ -302,9 +302,18 @@ jobs:
           SSH_DIR: ${{ steps.ssh.outputs.dir }}
         run: |
           set -euo pipefail
+          # Easv7 VMs default to the NVMe remote-disk controller, but our
+          # managed image (created from a V2 hyper-v-gen disk) only declares
+          # SCSI support. Easv7 supports both controllers, so force SCSI to
+          # match the image. Without this, az vm create fails with:
+          #   "The VM size 'Standard_E8-2as_v7' cannot boot with OS image or
+          #    disk. ... disk controller types supported by the OS image or
+          #    disk is one of the supported disk controller types for the VM
+          #    size".
           az vm create -g "$RG" -n smoke-vm \
             --image "$IMG" \
             --size Standard_E8-2as_v7 \
+            --disk-controller-type SCSI \
             --admin-username azureuser \
             --ssh-key-values "$SSH_DIR/id.pub" \
             --public-ip-sku Standard \
