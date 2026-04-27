@@ -92,20 +92,22 @@ jobs:
           set -euo pipefail
           az --version | head -n1
           require_flag() {
-            local cmd="$1" flag="$2"
-            if ! $cmd --help 2>&1 | grep -Fq -- "$flag"; then
-              echo "::error::Azure CLI '$cmd' is missing the '$flag' flag (CLI: $(az --version | head -n1)). This workflow depends on it; refuse to proceed."
+            local flag="$1"
+            shift
+            local cmd=("$@")
+            if ! "${cmd[@]}" --help 2>&1 | grep -Fq -- "$flag"; then
+              echo "::error::Azure CLI '${cmd[*]}' is missing the '$flag' flag (CLI: $(az --version | head -n1)). This workflow depends on it; refuse to proceed."
               exit 1
             fi
-            echo "ok: '$cmd $flag'"
+            echo "ok: '${cmd[*]} $flag'"
           }
           # Flags we depend on:
-          require_flag "az disk create"        "--upload-type"
-          require_flag "az disk create"        "--upload-size-bytes"
-          require_flag "az disk create"        "--hyper-v-generation"
-          require_flag "az disk grant-access"  "--access-level"
-          require_flag "az image create"       "--hyper-v-generation"
-          require_flag "az vm create"          "--disk-controller-type"
+          require_flag "--upload-type"          az disk create
+          require_flag "--upload-size-bytes"    az disk create
+          require_flag "--hyper-v-generation"   az disk create
+          require_flag "--access-level"         az disk grant-access
+          require_flag "--hyper-v-generation"   az image create
+          require_flag "--disk-controller-type" az vm create
 
       - name: Azure login (OIDC)
         if: steps.preflight.outputs.ok == 'true'
