@@ -127,11 +127,11 @@ The image we publish supports **both SCSI and NVMe**:
   SCSI (`hv_storvsc`, `hv_vmbus`, `hv_netvsc`) drivers to
   `boot.initrd.availableKernelModules`, so stage-1 finds the root
   filesystem regardless of which controller Azure exposes.
-* The smoke-test workflow stages the VHD with
-  `az disk create --for-upload --supported-disk-controller-types SCSI
-  NVMe`, and the managed image inherits
+* The smoke-test workflow stages the VHD with `az disk create --for-upload --supported-disk-controller-types SCSI NVMe`,
+  and the managed image inherits
   `supportedCapabilities.diskControllerTypes` from that source disk.
-  (`az image create` itself does not expose this flag.)
+  (Classic `az image create` does not expose this flag — it is set on
+  the source disk.)
 
 `az vm create` still has to pick **one** controller per VM via
 `--disk-controller-type`. The smoke test pins `SCSI` on a v6 SKU today
@@ -151,10 +151,9 @@ smoke-test workflow and the *Deploying to Azure* steps above, after
 direct-upload via `az disk create --for-upload`) or a **VHD page-blob URI**
 (`https://<account>.blob.core.windows.net/<container>/<name>.vhd`) if you
 chose the alternative storage-account flow instead. If you stage the
-disk yourself, pass
-`--supported-disk-controller-types SCSI NVMe` to `az disk create` so
-that the resulting managed image is bootable on v7 NVMe-only SKUs as
-well.
+disk yourself, pass `--supported-disk-controller-types SCSI NVMe` to
+`az disk create` so that the resulting managed image is bootable on v7
+NVMe-only SKUs as well.
 
 When booting your own VM from the published VHD, pass
 `--disk-controller-type SCSI` on v6-class SKUs and
