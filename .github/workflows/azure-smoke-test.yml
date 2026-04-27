@@ -119,7 +119,7 @@ jobs:
                 sleep "$delay"
               fi
             done
-            echo "::error::gh call failed after 3 attempts: $*"
+            echo "::error::gh call failed after 3 attempts: $*" >&2
             return 1
           }
           tag=$(gh_retry gh release list --limit 1 --json tagName -q '.[0].tagName')
