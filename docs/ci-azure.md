@@ -10,16 +10,17 @@ We use **one control RG + a small pool of dedicated run RGs**:
 
 ```
 subscription
-├── rg-nixos-ci-control       ← perpetual; staging storage account, budget
-│                                action group, etc.
-│     └── stnixoscistg<rand>   ← staging SA, container 'vhds' holds the
-│                                VHD that the smoke test deploys from
+├── rg-nixos-ci-control       ← perpetual; budget action group, etc.
 ├── rg-nixos-ci-run-01        ← perpetual *container*; emptied after each run
 └── rg-nixos-ci-run-02        ← perpetual *container*; emptied after each run
 ```
 
 The run RGs are **never deleted**. Each CI run picks one from the pool,
 uses it, and then empties it. See "Why RBAC survives" below.
+
+The smoke test stages each release VHD as a per-run **direct-upload
+managed disk** in the selected run RG (sealed and reaped within the
+same job), so no shared customer-owned storage account is required.
 
 Using a small pool (not a single RG) means a slow teardown on one run
 does not block the next run — the smoke-test workflow will pick a
@@ -79,21 +80,13 @@ The script:
 2. Creates a service principal with **federated credentials** for
    GitHub OIDC — no client secrets ever land in the repo.
 3. Grants the SP `Contributor` on each run RG and `Reader` on the
-   control RG.
-4. Creates the **staging storage account** in the control RG and
-   grants the SP `Storage Blob Data Contributor` on it (data-plane
-   RBAC, needed so the workflow can upload the VHD blob). The SA is
-   pinned to `publicNetworkAccess=Enabled`, `networkAcls.defaultAction=Allow`
-   and `bypass=AzureServices`; data-plane access is gated solely by
-   AAD RBAC and `allow-blob-public-access=false`. These settings are
-   reconciled on every bootstrap run, so re-running the script also
-   repairs an SA whose network posture has drifted (for example, after
-   a tenant Azure Policy remediation flipped it to `Deny`/`Disabled`,
-   which surfaces in the smoke test as `The request may be blocked by
-   network rules of storage account` during VHD upload).
-5. Creates a monthly subscription budget with an email action group
+   control RG. Contributor on the run RG is sufficient for the smoke
+   test's per-run managed-disk staging (`az disk create --for-upload`
+   + `az disk grant-access`); no shared storage account or extra
+   data-plane RBAC is needed.
+4. Creates a monthly subscription budget with an email action group
    (Layer 4).
-6. Prints the GitHub secrets and variables you need to set.
+5. Prints the GitHub secrets and variables you need to set.
 
 ### Required GitHub configuration
 
@@ -109,8 +102,6 @@ The script:
 * `AZURE_CONTROL_RG` — e.g. `rg-nixos-ci-control`
 * `AZURE_RUN_RGS` — space-separated list, e.g.
   `rg-nixos-ci-run-01 rg-nixos-ci-run-02`
-* `AZURE_STAGING_SA` — staging storage account name (printed by the
-  bootstrap script)
 
 **Environment**: create a GitHub Actions environment called
 `azure-janitor`. Its subject is referenced by the SP's federated
@@ -133,12 +124,17 @@ The weekly smoke test exercises the full release pipeline end-to-end:
 
 1. **Resolve latest release.** `gh release list/view` finds the most
    recent tag and the matching `nixos-azimage-<tag>.vhd.gz` asset.
-2. **Stage VHD.** Download + decompress on the runner, then upload to
-   `vhds/nixos-azimage-<tag>.vhd` on the staging SA. The upload is
-   skipped if a blob with that exact name already exists, so re-runs
-   on the same release are cheap.
-3. **Create Managed Image.** `az image create` from the blob URL into
-   the selected run RG (`hyper-v-generation V2`, `os-type Linux`).
+2. **Stage VHD as a managed disk.** Download + decompress on the
+   runner, then provision an empty managed disk with
+   `az disk create --for-upload --upload-size-bytes <stat -c %s>` in
+   the selected run RG. ARM hands out a short-lived write SAS via
+   `az disk grant-access`; AzCopy streams the VHD into it as a page
+   blob; `az disk revoke-access` seals the disk. No customer-owned
+   storage account is on the data path, so tenant policies that
+   forbid `publicNetworkAccess=Enabled` on storage accounts are
+   satisfied without networking exceptions.
+3. **Create Managed Image.** `az image create --source <disk-id>`
+   into the same run RG (`hyper-v-generation V2`, `os-type Linux`).
 4. **Boot VM.** A `Standard_E8-2as_v7` VM is created from the image with an
    ephemeral ed25519 SSH key generated on the runner. Inbound SSH is
    restricted by NSG to the runner's egress IP only.
@@ -146,11 +142,8 @@ The weekly smoke test exercises the full release pipeline end-to-end:
    and require `ID=nixos` plus a non-empty version string.
 6. **Teardown.** Existing complete-mode empty-template deployment
    wipes every resource (VM, disk, NIC, NSG, public IP, VNet,
-   image) but leaves the run RG and its role assignments intact.
+   image, *and the per-run staging disk*) but leaves the run RG and
+   its role assignments intact.
 
-Cost per run: well under $0.10 — a B1s VM lives <15 minutes, and
-the staging blob (~1 GB) costs cents per month at LRS hot tier.
-
-VHD blobs accumulate one per release. To keep storage bounded, set
-a lifecycle policy on the staging SA (e.g. delete blobs older than
-60 days) — not yet automated.
+Cost per run: well under $0.10 — the VM lives <15 minutes and the
+staging managed disk is deleted by teardown in the same job.
