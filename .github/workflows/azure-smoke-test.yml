@@ -44,7 +44,6 @@ jobs:
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_RUN_RGS:         ${{ vars.AZURE_RUN_RGS }}
           AZURE_CONTROL_RG:      ${{ vars.AZURE_CONTROL_RG }}
-          AZURE_STAGING_SA:      ${{ vars.AZURE_STAGING_SA }}
         run: |
           set -u
           missing=()
@@ -53,7 +52,6 @@ jobs:
           [ -n "${AZURE_SUBSCRIPTION_ID:-}" ] || missing+=("secret AZURE_SUBSCRIPTION_ID")
           [ -n "${AZURE_RUN_RGS:-}" ]         || missing+=("var AZURE_RUN_RGS")
           [ -n "${AZURE_CONTROL_RG:-}" ]      || missing+=("var AZURE_CONTROL_RG")
-          [ -n "${AZURE_STAGING_SA:-}" ]      || missing+=("var AZURE_STAGING_SA")
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "::notice::Azure CI is not bootstrapped — skipping. Missing: ${missing[*]}. Run scripts/bootstrap-azure-ci.sh to configure."
             echo "ok=false" >> "$GITHUB_OUTPUT"
@@ -131,71 +129,81 @@ jobs:
           echo "url=$url"     >> "$GITHUB_OUTPUT"
           echo "vhd=$vhd"     >> "$GITHUB_OUTPUT"
 
-      - name: Stage VHD in Azure (idempotent upload)
+      - name: Stage VHD as managed disk in run RG
         if: steps.preflight.outputs.ok == 'true'
         id: stage
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SA:    ${{ vars.AZURE_STAGING_SA }}
-          TAG:   ${{ steps.rel.outputs.tag }}
-          ASSET: ${{ steps.rel.outputs.asset }}
-          VHD:   ${{ steps.rel.outputs.vhd }}
+          RG:       ${{ steps.pick.outputs.rg }}
+          LOCATION: ${{ vars.AZURE_LOCATION }}
+          TAG:      ${{ steps.rel.outputs.tag }}
+          ASSET:    ${{ steps.rel.outputs.asset }}
+          VHD:      ${{ steps.rel.outputs.vhd }}
         run: |
           set -euo pipefail
-          # Self-heal: make sure the staging container exists. The
-          # bootstrap script creates it, but it can get deleted out of
-          # band (manual cleanup, lifecycle policy, etc.). Recreating
-          # it here is idempotent and keeps the smoke test resilient
-          # without requiring a re-run of bootstrap-azure-ci.sh.
-          az storage container create \
-            --account-name "$SA" --name vhds \
-            --auth-mode login >/dev/null
-          # Skip download/upload if the blob already exists *and* is a
-          # page blob. Azure managed images require the source VHD to be
-          # a page blob in fixed-VHD format; a block blob upload triggers
-          # `(InvalidParameter) ... cookie value 'conectix'` from
-          # `az image create`. If a previous run staged the VHD as a
-          # block blob (the historical default), drop it and re-upload.
-          exists=$(az storage blob exists \
-            --account-name "$SA" --container-name vhds --name "$VHD" \
-            --auth-mode login --query exists -o tsv)
-          blob_type=""
-          if [ "$exists" = "true" ]; then
-            blob_type=$(az storage blob show \
-              --account-name "$SA" --container-name vhds --name "$VHD" \
-              --auth-mode login --query properties.blobType -o tsv)
-          fi
-          if [ "$exists" = "true" ] && [ "$blob_type" = "PageBlob" ]; then
-            echo "blob $VHD already staged as page blob — skipping upload"
+          # Direct-upload managed disk: ARM hands out a short-lived
+          # write SAS backed by Azure's compute fabric (not a customer
+          # storage account), the runner streams the VHD into it, then
+          # ARM seals the disk. No storage account is on the data path,
+          # so org policies that forbid publicNetworkAccess=Enabled on
+          # storage accounts are satisfied without any networking
+          # exception, private endpoint, or self-hosted runner.
+          DISK_NAME="smoke-src-${TAG}"
+          # Idempotent: reuse an existing sealed disk for the same
+          # release tag if a previous attempt already finished. If a
+          # prior attempt is wedged in ReadyToUpload (e.g. the runner
+          # died mid-upload), drop and recreate so we get a fresh SAS.
+          state=$(az disk show -g "$RG" -n "$DISK_NAME" \
+            --query diskState -o tsv 2>/dev/null || true)
+          if [ "$state" = "Unattached" ] || [ "$state" = "Attached" ]; then
+            echo "disk $DISK_NAME already sealed (state=$state) — reusing"
+            disk_id=$(az disk show -g "$RG" -n "$DISK_NAME" --query id -o tsv)
           else
-            if [ "$exists" = "true" ]; then
-              echo "blob $VHD exists but is type '$blob_type' (need PageBlob) — replacing"
-              az storage blob delete \
-                --account-name "$SA" --container-name vhds --name "$VHD" \
-                --auth-mode login >/dev/null
+            if [ -n "$state" ]; then
+              echo "disk $DISK_NAME exists in state '$state' — recreating"
+              az disk delete -g "$RG" -n "$DISK_NAME" --yes >/dev/null
             fi
             echo "downloading $ASSET from latest release"
             gh release download "$TAG" --pattern "$ASSET" --output "$ASSET"
             echo "decompressing"
             gunzip "$ASSET"
             ls -lh "$VHD"
-            echo "uploading to $SA/vhds/$VHD as page blob"
-            az storage blob upload \
-              --account-name "$SA" --container-name vhds --name "$VHD" \
-              --file "$VHD" --type page \
-              --auth-mode login --overwrite false
+            # The uncompressed VHD is the fixed-VHD blob (data + 512B
+            # footer). az disk create --upload-size-bytes wants exactly
+            # that size; `stat -c %s` gives it without hard-coding the
+            # 8 GiB+512 B figure pinned by virtualisation.diskSize in
+            # core_pulse.nix.
+            size=$(stat -c %s "$VHD")
+            echo "creating managed disk $DISK_NAME (--for-upload, $size bytes)"
+            disk_id=$(az disk create -g "$RG" -n "$DISK_NAME" \
+              --location "$LOCATION" \
+              --for-upload \
+              --upload-size-bytes "$size" \
+              --hyper-v-generation V2 \
+              --os-type Linux \
+              --query id -o tsv)
+            echo "requesting write SAS"
+            sas=$(az disk grant-access -g "$RG" -n "$DISK_NAME" \
+              --access-level Write \
+              --duration-in-seconds 3600 \
+              --query accessSAS -o tsv)
+            # azcopy is preinstalled on ubuntu-latest GitHub-hosted runners.
+            echo "uploading VHD via AzCopy"
+            AZCOPY_LOG_LOCATION=$(mktemp -d) \
+              azcopy copy "$VHD" "$sas" --blob-type PageBlob
+            echo "revoking write SAS"
+            az disk revoke-access -g "$RG" -n "$DISK_NAME" >/dev/null
             rm -f "$VHD"
           fi
-          echo "blob_url=https://${SA}.blob.core.windows.net/vhds/${VHD}" \
-            >> "$GITHUB_OUTPUT"
+          echo "disk_id=$disk_id" >> "$GITHUB_OUTPUT"
 
-      - name: Create Managed Image from staged VHD
+      - name: Create Managed Image from staged disk
         if: steps.preflight.outputs.ok == 'true'
         id: image
         env:
-          RG:       ${{ steps.pick.outputs.rg }}
-          TAG:      ${{ steps.rel.outputs.tag }}
-          BLOB_URL: ${{ steps.stage.outputs.blob_url }}
+          RG:      ${{ steps.pick.outputs.rg }}
+          TAG:     ${{ steps.rel.outputs.tag }}
+          DISK_ID: ${{ steps.stage.outputs.disk_id }}
         run: |
           set -euo pipefail
           IMG="smoke-img-${TAG}"
@@ -204,7 +212,7 @@ jobs:
             az image create -g "$RG" -n "$IMG" \
               --os-type Linux \
               --hyper-v-generation V2 \
-              --source "$BLOB_URL" >/dev/null
+              --source "$DISK_ID" >/dev/null
           fi
           echo "image=$IMG" >> "$GITHUB_OUTPUT"
 

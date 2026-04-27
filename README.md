@@ -129,7 +129,6 @@ OIDC trust between GitHub and Azure:
 | `--control-rg` *(optional)* | Name of the shared control RG (default `rg-nixos-ci-control`). | |
 | `--run-rg-prefix` *(optional)* | Prefix for the run RG names (default `rg-nixos-ci-run`, yielding `rg-nixos-ci-run-01`, `-02`, …). | |
 | `--sp-name` *(optional)* | Display name of the service principal (default `sp-nixos-azimage-builder-ci`). | |
-| `--staging-sa` *(optional)* | Name of the staging storage account in the control RG. If omitted, an existing one tagged `role=staging` is reused, or a new `stnixoscistg<rand>` is generated. | Storage account names: 3–24 lowercase alphanumeric, globally unique. |
 | `--budget-amount` *(optional)* | Monthly budget in USD (default `10`). | |
 
 The script is **idempotent** — re-running it reconciles state instead of
@@ -153,13 +152,13 @@ What it does:
    * `ref:refs/heads/main` (weekly build + smoke test)
    * `environment:azure-janitor` (daily janitor)
 3. Grants the SP `Contributor` on each run RG and `Reader` on the control RG.
-4. Creates a **staging storage account** in the control RG (Standard LRS,
-   private, TLS 1.2+) with a `vhds` container, and grants the SP
-   `Storage Blob Data Contributor` on it. The smoke test stages each
-   release's VHD here so Azure can build a Managed Image from it.
-5. Creates a monthly subscription budget with an email notification (Layer 4
+   Contributor on the run RG is sufficient for the smoke test's per-run
+   managed-disk staging (`az disk create --for-upload` + `az disk
+   grant-access`); no shared storage account or extra data-plane RBAC
+   is needed.
+4. Creates a monthly subscription budget with an email notification (Layer 4
    backstop).
-6. Prints the GitHub Secrets / Variables you need to configure.
+5. Prints the GitHub Secrets / Variables you need to configure.
 
 ### Wiring the output into GitHub
 
@@ -177,8 +176,6 @@ variables → Actions** in your repo:
 * `AZURE_LOCATION` — e.g. `southeastasia`.
 * `AZURE_CONTROL_RG` — e.g. `rg-nixos-ci-control`.
 * `AZURE_RUN_RGS` — space-separated list, e.g. `rg-nixos-ci-run-01 rg-nixos-ci-run-02`.
-* `AZURE_STAGING_SA` — the staging storage account name printed by the
-  bootstrap script (e.g. `stnixoscistgab12cd34`).
 
 **Environment**
 
