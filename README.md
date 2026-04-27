@@ -107,8 +107,15 @@ az image create -g "$RG" -n "$IMG" \
   --os-type Linux \
   --hyper-v-generation V2 \
   --supported-disk-controller-types SCSI,NVMe \
-  --source "$DISK_ID"
+  --source "$SOURCE"
 ```
+
+`$SOURCE` is whatever `az image create --source` accepts for your flow:
+a **managed disk resource ID** (as the smoke-test workflow uses, after
+direct-upload via `az disk create --for-upload`) or a **VHD page-blob URI**
+(`https://<account>.blob.core.windows.net/<container>/<name>.vhd`) if you
+followed the *Deploying to Azure* steps above and uploaded the VHD to a
+storage account.
 
 `az vm create` still has to pick **one** controller per VM via
 `--disk-controller-type`. The smoke test currently pins `SCSI` because that
