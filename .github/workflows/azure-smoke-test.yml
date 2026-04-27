@@ -93,7 +93,7 @@ jobs:
 
       # --- actual deploy + smoke test --------------------------------------
       # Pull the latest released VHD, push it through Azure as a Managed
-      # Image, boot a tiny B1s VM from it locked down to the runner's IP,
+      # Image, boot a small B2s VM from it locked down to the runner's IP,
       # SSH in, and assert NixOS booted. Cost per run: well under $0.10.
       - name: Resolve latest release
         if: steps.preflight.outputs.ok == 'true'
@@ -257,7 +257,7 @@ jobs:
           set -euo pipefail
           az vm create -g "$RG" -n smoke-vm \
             --image "$IMG" \
-            --size Standard_B1s \
+            --size Standard_B2s \
             --admin-username azureuser \
             --ssh-key-values "$SSH_DIR/id.pub" \
             --public-ip-sku Standard \
