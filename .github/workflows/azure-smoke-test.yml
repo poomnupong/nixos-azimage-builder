@@ -345,45 +345,52 @@ jobs:
 
           # 3. Create image version from the uploaded managed disk.
           #    --os-snapshot accepts both snapshot and managed-disk resource IDs.
+          #    --target-regions explicitly sets the replication target to the
+          #    gallery's own region so Azure doesn't silently skip it.
           created_new_version=false
           if ! az sig image-version show -g "$RG" -r "$GALLERY" -i "$IMG_DEF" -e "$IMG_VER" >/dev/null 2>&1; then
             echo "creating image version $IMG_VER"
             az sig image-version create -g "$RG" -r "$GALLERY" -i "$IMG_DEF" -e "$IMG_VER" \
               --location "$LOCATION" \
               --os-snapshot "$SOURCE_ID" \
-              --replica-count 1 >/dev/null
+              --replica-count 1 \
+              --target-regions "$LOCATION=1" >/dev/null
             created_new_version=true
           fi
 
           # 4. Wait for image version replication to complete.
-          #    az sig image-version create returns before replication finishes;
-          #    az vm create will fail if the image is still replicating.
+          #    provisioningState=Succeeded is necessary but NOT sufficient —
+          #    the per-region aggregatedState from --expand ReplicationStatus
+          #    must also be "Completed" before az vm create can find the image.
           echo "waiting for image version replication…"
           for i in $(seq 1 30); do
-            state=$(az sig image-version show \
+            prov_state=$(az sig image-version show \
               -g "$RG" -r "$GALLERY" -i "$IMG_DEF" -e "$IMG_VER" \
               --query provisioningState -o tsv)
-            echo "  attempt $i: provisioningState=$state"
-            if [ "$state" = "Succeeded" ]; then
+            repl_state=$(az sig image-version show \
+              -g "$RG" -r "$GALLERY" -i "$IMG_DEF" -e "$IMG_VER" \
+              --expand ReplicationStatus \
+              --query 'replicationStatus.aggregatedState' -o tsv 2>/dev/null || echo "QueryFailed")
+            echo "  attempt $i: provisioningState=$prov_state  aggregatedState=$repl_state"
+            if [ "$prov_state" = "Succeeded" ] && [ "$repl_state" = "Completed" ]; then
               break
-            elif [ "$state" = "Failed" ]; then
+            elif [ "$prov_state" = "Failed" ]; then
               echo "::error::Image version replication failed"
               exit 1
             fi
             sleep 30
           done
-          if [ "$state" != "Succeeded" ]; then
-            echo "::error::Image version replication did not complete within 15 minutes"
+          if [ "$prov_state" != "Succeeded" ] || [ "$repl_state" != "Completed" ]; then
+            echo "::error::Image version replication did not complete in time (30x30s polling; prov=$prov_state repl=$repl_state)"
             exit 1
           fi
 
-          # provisioningState=Succeeded does not guarantee the image is
-          # immediately visible to the ARM deployment service. Give Azure
-          # a grace period before attempting az vm create — but only when
-          # we just created a new image version in this run.
+          # Even after aggregatedState=Completed, the ARM deployment service
+          # may take additional time to become aware of the new image version.
+          # Give Azure a grace period — but only when we just created one.
           if [ "$created_new_version" = "true" ]; then
-            echo "image version replicated; waiting 60s for propagation..."
-            sleep 60
+            echo "image version replicated; waiting 120s for ARM propagation..."
+            sleep 120
           else
             echo "image version already existed; skipping propagation delay"
           fi
@@ -446,10 +453,11 @@ jobs:
           # (SCSI-only). The NixOS initrd carries both NVMe and SCSI
           # drivers via core_pulse.nix.
           #
-          # Retry loop: az sig image-version provisioningState=Succeeded
-          # does NOT guarantee the image is immediately visible to the
-          # deployment service. Retrying handles this propagation delay.
-          for attempt in 1 2 3; do
+          # Retry loop: even after aggregatedState=Completed + propagation
+          # delay, the ARM deployment service may still not see the image.
+          # Retry with increasing back-off to ride out transient visibility.
+          max_attempts=5
+          for attempt in $(seq 1 $max_attempts); do
             echo "az vm create attempt $attempt"
             if az vm create -g "$RG" -n smoke-vm \
               --image "$IMG" \
@@ -462,11 +470,11 @@ jobs:
               --output none; then
               break
             fi
-            if [ "$attempt" -eq 3 ]; then
-              echo "::error::az vm create failed after 3 attempts"
+            if [ "$attempt" -eq "$max_attempts" ]; then
+              echo "::error::az vm create failed after $max_attempts attempts"
               exit 1
             fi
-            echo "retrying in 60s..."
+            echo "retrying in 90s..."
             # Clean up the failed VM resource before retrying and wait for
             # Azure to finish deleting it so the next create does not race
             # with an in-progress delete.
@@ -476,7 +484,7 @@ jobs:
             else
               echo "No existing smoke-vm found to clean up before retry"
             fi
-            sleep 60
+            sleep 90
           done
           ip=$(az vm show -d -g "$RG" -n smoke-vm --query publicIps -o tsv)
           if [ -z "$ip" ]; then
