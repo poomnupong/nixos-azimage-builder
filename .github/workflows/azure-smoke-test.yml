@@ -308,7 +308,7 @@ jobs:
         env:
           RG:       ${{ steps.pick.outputs.rg }}
           TAG:      ${{ steps.rel.outputs.tag }}
-          DISK_ID:  ${{ steps.stage.outputs.disk_id }}
+          SOURCE_ID: ${{ steps.stage.outputs.disk_id }}
           LOCATION: ${{ vars.AZURE_LOCATION }}
         run: |
           set -euo pipefail
@@ -338,11 +338,12 @@ jobs:
           fi
 
           # 3. Create image version from the uploaded managed disk.
+          #    --os-snapshot accepts both snapshot and managed-disk resource IDs.
           if ! az sig image-version show -g "$RG" -r "$GALLERY" -i "$IMG_DEF" -e "$IMG_VER" >/dev/null 2>&1; then
             echo "creating image version $IMG_VER"
             az sig image-version create -g "$RG" -r "$GALLERY" -i "$IMG_DEF" -e "$IMG_VER" \
               --location "$LOCATION" \
-              --os-snapshot "$DISK_ID" \
+              --os-snapshot "$SOURCE_ID" \
               --replica-count 1 >/dev/null
           fi
 
