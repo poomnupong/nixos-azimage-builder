@@ -293,6 +293,14 @@ jobs:
             cleanup_azcopy_temp_dirs
             echo "revoking write SAS"
             az disk revoke-access -g "$RG" -n "$DISK_NAME" >/dev/null
+            # The Azure CLI has no flag to set supportedCapabilities.diskControllerTypes
+            # on a managed disk (verified on azure-cli 2.85.0). Use the ARM REST API
+            # directly so the disk matches the gallery image definition's
+            # DiskControllerTypes=NVMe,SCSI feature declaration.
+            echo "stamping diskControllerTypes on managed disk"
+            az rest --method PATCH \
+              --url "${disk_id}?api-version=2024-03-02" \
+              --body '{"properties":{"supportedCapabilities":{"diskControllerTypes":"SCSI, NVMe"}}}'
             rm -f "$VHD"
           fi
           echo "disk_id=$disk_id" >> "$GITHUB_OUTPUT"
