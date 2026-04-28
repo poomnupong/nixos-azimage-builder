@@ -311,6 +311,8 @@ jobs:
           LOCATION: ${{ vars.AZURE_LOCATION }}
         run: |
           set -euo pipefail
+          # Gallery names allow only alphanumerics, underscores, and periods
+          # (no hyphens), so convert TAG dashes to underscores.
           GALLERY="smoke_gallery_${TAG//-/_}"
           IMG_DEF="nixos-smoke"
           IMG_VER="1.0.0"
