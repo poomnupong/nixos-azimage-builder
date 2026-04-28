@@ -345,12 +345,14 @@ jobs:
 
           # 3. Create image version from the uploaded managed disk.
           #    --os-snapshot accepts both snapshot and managed-disk resource IDs.
+          created_new_version=false
           if ! az sig image-version show -g "$RG" -r "$GALLERY" -i "$IMG_DEF" -e "$IMG_VER" >/dev/null 2>&1; then
             echo "creating image version $IMG_VER"
             az sig image-version create -g "$RG" -r "$GALLERY" -i "$IMG_DEF" -e "$IMG_VER" \
               --location "$LOCATION" \
               --os-snapshot "$SOURCE_ID" \
               --replica-count 1 >/dev/null
+            created_new_version=true
           fi
 
           # 4. Wait for image version replication to complete.
@@ -373,6 +375,17 @@ jobs:
           if [ "$state" != "Succeeded" ]; then
             echo "::error::Image version replication did not complete within 15 minutes"
             exit 1
+          fi
+
+          # provisioningState=Succeeded does not guarantee the image is
+          # immediately visible to the ARM deployment service. Give Azure
+          # a grace period before attempting az vm create — but only when
+          # we just created a new image version in this run.
+          if [ "$created_new_version" = "true" ]; then
+            echo "image version replicated; waiting 60s for propagation..."
+            sleep 60
+          else
+            echo "image version already existed; skipping propagation delay"
           fi
 
           # Build the fully-qualified image ID for az vm create.
@@ -432,15 +445,39 @@ jobs:
           # support. Standard_B16as_v2 is a burstable B-series SKU
           # (SCSI-only). The NixOS initrd carries both NVMe and SCSI
           # drivers via core_pulse.nix.
-          az vm create -g "$RG" -n smoke-vm \
-            --image "$IMG" \
-            --size Standard_B16as_v2 \
-            --disk-controller-type SCSI \
-            --admin-username azureuser \
-            --ssh-key-values "$SSH_DIR/id.pub" \
-            --public-ip-sku Standard \
-            --nsg smoke-nsg \
-            --output none
+          #
+          # Retry loop: az sig image-version provisioningState=Succeeded
+          # does NOT guarantee the image is immediately visible to the
+          # deployment service. Retrying handles this propagation delay.
+          for attempt in 1 2 3; do
+            echo "az vm create attempt $attempt"
+            if az vm create -g "$RG" -n smoke-vm \
+              --image "$IMG" \
+              --size Standard_B16as_v2 \
+              --disk-controller-type SCSI \
+              --admin-username azureuser \
+              --ssh-key-values "$SSH_DIR/id.pub" \
+              --public-ip-sku Standard \
+              --nsg smoke-nsg \
+              --output none; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::az vm create failed after 3 attempts"
+              exit 1
+            fi
+            echo "retrying in 60s..."
+            # Clean up the failed VM resource before retrying and wait for
+            # Azure to finish deleting it so the next create does not race
+            # with an in-progress delete.
+            if az vm show -g "$RG" -n smoke-vm --output none 2>/dev/null; then
+              az vm delete -g "$RG" -n smoke-vm --yes
+              az vm wait -g "$RG" -n smoke-vm --deleted
+            else
+              echo "No existing smoke-vm found to clean up before retry"
+            fi
+            sleep 60
+          done
           ip=$(az vm show -d -g "$RG" -n smoke-vm --query publicIps -o tsv)
           if [ -z "$ip" ]; then
             echo "::error::VM has no public IP"
