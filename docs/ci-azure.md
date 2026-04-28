@@ -175,11 +175,8 @@ The weekly smoke test exercises the full release pipeline end-to-end:
    ```
 
 3. **Create Compute Gallery image.** A per-run Azure Compute Gallery,
-   image definition (with `DiskControllerTypes=NVMe,SCSI` declared),
-   and image version are created from the staged managed disk. Compute
-   Gallery is used instead of `az image create` because Azure managed
-   images do not support declaring `diskControllerTypes`, which is
-   required for v7 NVMe-only SKUs.
+   image definition (with `DiskControllerTypes=SCSI` declared), and
+   image version are created from the staged managed disk.
 4. **Boot VM.** A `Standard_B16as_v2` VM is created from the gallery
    image with `--disk-controller-type SCSI` and an ephemeral ed25519
    SSH key generated on the runner. Inbound SSH is restricted by NSG
