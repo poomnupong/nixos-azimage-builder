@@ -258,8 +258,8 @@ jobs:
             # (verified on azure-cli 2.85.0; see the CLI sanity preflight
             # step earlier in this workflow). The disk controller is
             # selected per-VM via `az vm create --disk-controller-type`
-            # below; the smoke VM uses Standard_B16as_v2
-            # with `--disk-controller-type NVMe`, booting from a gallery
+            # below; the smoke VM uses Standard_B16as_v2 (SCSI-only)
+            # with `--disk-controller-type SCSI`, booting from a gallery
             # image that declares NVMe + SCSI support.
             disk_id=$(az disk create -g "$RG" -n "$DISK_NAME" \
               --location "$LOCATION" \
@@ -410,13 +410,13 @@ jobs:
           set -euo pipefail
           # The gallery image definition declares both NVMe and SCSI disk
           # controller support. Standard_B16as_v2 is a burstable B-series
-          # SKU available in westus3; we pin --disk-controller-type NVMe.
+          # SKU (SCSI-only); we pin --disk-controller-type SCSI.
           # The NixOS initrd carries both NVMe and SCSI drivers via
           # core_pulse.nix.
           az vm create -g "$RG" -n smoke-vm \
             --image "$IMG" \
             --size Standard_B16as_v2 \
-            --disk-controller-type NVMe \
+            --disk-controller-type SCSI \
             --admin-username azureuser \
             --ssh-key-values "$SSH_DIR/id.pub" \
             --public-ip-sku Standard \

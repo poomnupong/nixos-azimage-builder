@@ -181,7 +181,7 @@ The weekly smoke test exercises the full release pipeline end-to-end:
    images do not support declaring `diskControllerTypes`, which is
    required for v7 NVMe-only SKUs.
 4. **Boot VM.** A `Standard_B16as_v2` VM is created from the gallery
-   image with `--disk-controller-type NVMe` and an ephemeral ed25519
+   image with `--disk-controller-type SCSI` and an ephemeral ed25519
    SSH key generated on the runner. Inbound SSH is restricted by NSG
    to the runner's egress IP only.
 5. **Assert.** SSH in, run `cat /etc/os-release` and `nixos-version`,
