@@ -470,9 +470,12 @@ jobs:
           az_oidc_login() {
             echo "refreshing OIDC token..."
             local oidc_token
-            oidc_token=$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            if ! oidc_token=$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
               "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" \
-              | jq -r '.value')
+              | jq -r '.value'); then
+              echo "::error::Failed to obtain OIDC token from GitHub"
+              return 1
+            fi
             if [ -z "$oidc_token" ] || [ "$oidc_token" = "null" ]; then
               echo "::error::Failed to obtain OIDC token from GitHub"
               return 1
