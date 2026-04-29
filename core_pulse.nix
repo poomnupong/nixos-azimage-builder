@@ -43,6 +43,17 @@
     ];
   };
 
+  # Azure provisioning user.
+  # az vm create --admin-username azureuser injects an SSH key via waagent.
+  # The user must exist at boot so waagent only needs to write the key to
+  # ~/.ssh/authorized_keys (which sshd reads via AuthorizedKeysFile).
+  # Do NOT set openssh.authorizedKeys.keys here — let waagent manage them.
+  users.users.azureuser = {
+    isNormalUser = true;
+    description = "Azure admin user";
+    extraGroups = [ "wheel" ];
+  };
+
   # Allow the default user to use sudo without a password (handy for CI/CD).
   security.sudo.wheelNeedsPassword = false;
 
