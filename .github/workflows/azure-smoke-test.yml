@@ -450,9 +450,10 @@ jobs:
         if: steps.preflight.outputs.ok == 'true'
         id: vm
         env:
-          RG:    ${{ steps.pick.outputs.rg }}
-          IMG:   ${{ steps.image.outputs.image }}
-          SSH_DIR: ${{ steps.ssh.outputs.dir }}
+          RG:       ${{ steps.pick.outputs.rg }}
+          IMG:      ${{ steps.image.outputs.image }}
+          SSH_DIR:  ${{ steps.ssh.outputs.dir }}
+          LOCATION: ${{ vars.AZURE_LOCATION }}
         run: |
           set -euo pipefail
           # The gallery image definition declares SCSI disk controller
@@ -467,6 +468,7 @@ jobs:
           for attempt in $(seq 1 $max_attempts); do
             echo "az vm create attempt $attempt"
             if az vm create -g "$RG" -n smoke-vm \
+              --location "$LOCATION" \
               --image "$IMG" \
               --size Standard_B16as_v2 \
               --disk-controller-type SCSI \
