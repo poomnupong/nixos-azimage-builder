@@ -19,6 +19,9 @@ on:
   schedule:
     # Saturday 18:00 UTC (≈ Sat night US Central)
     - cron: "0 18 * * 6"
+  workflow_run:
+    workflows: ["Weekly Forge"]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -32,6 +35,11 @@ concurrency:
 jobs:
   smoke:
     name: Deploy latest VHD and smoke-test
+    # When triggered by workflow_run (Weekly Forge), only run if the forge succeeded.
+    # Schedule and workflow_dispatch triggers always run (workflow_run.conclusion is empty).
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
