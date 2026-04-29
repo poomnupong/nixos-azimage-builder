@@ -63,9 +63,10 @@ nixos-azimage-builder/
        ];
      };
 
-     # Azure provisioning user — must exist so cloud-init only writes
-     # the SSH key.  Do NOT set openssh.authorizedKeys.keys here;
-     # the key is injected at deployment time by az vm create.
+     # Azure provisioning user — must exist so the Azure provisioning
+     # agent (waagent/cloud-init) only writes the SSH key.  Do NOT set
+     # openssh.authorizedKeys.keys here; the key is injected at
+     # deployment time by az vm create.
      users.users.azureuser = {
        isNormalUser = true;
        extraGroups = [ "wheel" ];
