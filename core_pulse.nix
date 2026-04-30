@@ -160,15 +160,12 @@
   # NVMe controller is not reliably detected by udev during initramfs
   # coldplug — leaving the root device invisible and causing a panic →
   # reboot loop → OSProvisioningTimedOut.
+  # MANA is also force-loaded: Azure VMs need networking available
+  # early so cloud-init can reach the wireserver (168.63.129.16)
+  # and report provisioning status within Azure's 20-min timeout.
   boot.initrd.kernelModules = [
     "nvme"
     "nvme_core"
-  ];
-
-  # MANA stays in availableKernelModules: it is only needed for
-  # networking on v7+ SKUs (not for root-device access), and udev
-  # can load it on demand once the system is past initramfs.
-  boot.initrd.availableKernelModules = [
     "mana"
   ];
 }
