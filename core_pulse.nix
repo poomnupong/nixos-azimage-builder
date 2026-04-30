@@ -139,8 +139,7 @@
   # the guest:
   #   * Older series (Dasv5/Easv5 and earlier): Hyper-V SCSI only
   #     (root appears as /dev/sda).
-  #   * v6 series (Dasv6/Easv6): Hyper-V SCSI by default, or NVMe when
-  #     deployed with `az vm create --disk-controller-type NVMe`.
+  #   * v6 series (Dasv6/Easv6): NVMe-only (SCSI boot fails — see PR #50).
   #   * v7 series (Dasv7/Easv7): NVMe-only (root appears as /dev/nvme0n1).
   #
   # Network adapters also vary:
@@ -161,10 +160,10 @@
   # difference between /dev/sda and /dev/nvme0n1 is irrelevant once the
   # driver is loaded.
   boot.initrd.availableKernelModules = [
-    # NVMe (v7 SKUs, and v6 when --disk-controller-type NVMe)
+    # NVMe (v6 and v7 SKUs)
     "nvme"
     "nvme_core"
-    # Hyper-V SCSI / VMBus / netvsc (v5 and earlier, default path on v6)
+    # Hyper-V SCSI / VMBus / netvsc (v5 and earlier)
     "hv_storvsc"
     "hv_vmbus"
     "hv_netvsc"
