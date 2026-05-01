@@ -164,7 +164,7 @@
   # Critically, Azure NVMe sits behind a Hyper-V virtual PCI bridge:
   #   hv_vmbus → pci_hyperv (virtual PCI bus) → nvme (PCIe NVMe device)
   # Without pci_hyperv, the virtual PCI bus never initializes and the
-  # NVMe controller is invisible to the guest kernel.  SCSI bypasses
+  # NVMe controller is invisible to the guest kernel. SCSI bypasses
   # PCI entirely (it goes through hv_storvsc over VMBus), which is why
   # SCSI boots worked without this module.
   #
