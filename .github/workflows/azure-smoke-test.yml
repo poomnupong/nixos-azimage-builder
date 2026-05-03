@@ -816,12 +816,19 @@ jobs:
           #
           # Note: az vm run-command can take 1-2 minutes — this is normal.
           echo "running az vm run-command invoke on $vm_name (may take 1-2 minutes)..."
+          set +e
           runcmd_output=$(az vm run-command invoke \
             -g "$RG" \
             -n "$vm_name" \
             --command-id RunShellScript \
             --scripts 'echo "run-command-ok"; cat /etc/os-release; nixos-version' \
             -o json)
+          runcmd_status=$?
+          set -e
+          if [ "$runcmd_status" -ne 0 ]; then
+            echo "run_command_ok=false" >> "$GITHUB_OUTPUT"
+            exit "$runcmd_status"
+          fi
 
           # The combined stdout+stderr is in .value[0].message.
           # Use // "" rather than // empty so a null or missing field
