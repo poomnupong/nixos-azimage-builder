@@ -226,6 +226,22 @@ if you chose the alternative storage-account flow.
 
 ---
 
+## Security type
+
+Images are built as **Generation 2** (UEFI/GPT) with **Standard** security.
+
+Trusted Launch is **not supported**:
+
+- **Secure Boot** — NixOS uses `systemd-boot` which is not signed with
+  Microsoft's UEFI key. Enabling Secure Boot will prevent the VM from booting.
+- **vTPM** — Technically compatible, but provides no practical benefit without
+  an attestation consumer (e.g. Azure Defender, Microsoft Sentinel).
+
+Deploy VMs with `--security-type Standard` (the default). Do **not** pass
+`--security-type TrustedLaunch` or `--enable-secure-boot true`.
+
+---
+
 ## Azure CI setup (one-time bootstrap)
 
 The weekly build always runs in GitHub Actions, but the **smoke-test** and
