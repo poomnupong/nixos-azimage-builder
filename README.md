@@ -256,7 +256,7 @@ Images are built as **Generation 2** (UEFI/GPT) with **Standard** security.
 
 Trusted Launch is **not supported**:
 
-- **Secure Boot** — NixOS uses `systemd-boot` which is not signed with
+- **Secure Boot** — This image uses GRUB-EFI, which is not signed with
   Microsoft's UEFI key. Enabling Secure Boot will prevent the VM from booting.
 - **vTPM** — Technically compatible, but provides no practical benefit without
   an attestation consumer (e.g. Azure Defender, Microsoft Sentinel).
