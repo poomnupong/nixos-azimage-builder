@@ -654,20 +654,67 @@ jobs:
 
           # Poll the Azure control plane for waagent readiness.
           # displayStatus == "Ready" means the guest agent is live and has
-          # written the SSH key to authorized_keys — SSH will work on the
-          # first attempt without any retry loop.
+          # written the SSH key to authorized_keys.
           # 30 attempts × 10s = 5 minutes max.
+          #
+          # We fetch the FULL instance view (not just .vmAgent) so we can
+          # also fast-fail on terminal states (ProvisioningState/failed,
+          # PowerState/stopped|deallocated) rather than waiting the full
+          # 5 minutes on a VM that has crashed or been given up on.
           display="unknown"
+          consecutive_errors=0
+          az_err_log=$(mktemp)
+          trap 'rm -f "$az_err_log"' EXIT
+
+          dump_diagnostics() {
+            echo "--- Boot diagnostics (last 50 lines) ---"
+            az vm boot-diagnostics get-boot-log -g "$RG" -n "$vm_name" 2>/dev/null | tail -50 \
+              || echo "(boot diagnostics unavailable)"
+          }
+
           for i in $(seq 1 30); do
-            agent_status=$(az vm get-instance-view -g "$RG" -n "$vm_name" \
-              --query 'instanceView.vmAgent' -o json 2>/dev/null || true)
+            # Capture stderr so genuine CLI errors (auth expiry, throttling,
+            # ARM errors) are surfaced rather than silently treated as
+            # "agent not ready". Tolerate a couple of transient failures,
+            # but bail out loudly if they persist.
+            if instance_json=$(az vm get-instance-view -g "$RG" -n "$vm_name" \
+                -o json 2>"$az_err_log"); then
+              consecutive_errors=0
+            else
+              consecutive_errors=$((consecutive_errors + 1))
+              echo "attempt $i: az vm get-instance-view failed (consecutive errors: $consecutive_errors)"
+              sed 's/^/  az: /' "$az_err_log" || true
+              if [ "$consecutive_errors" -ge 3 ]; then
+                echo "::error::az vm get-instance-view failed $consecutive_errors consecutive times — see CLI error above"
+                exit 1
+              fi
+              sleep 10
+              continue
+            fi
 
-            display=$(echo "$agent_status"   | jq -r '.statuses[0].displayStatus // "unknown"')
-            message=$(echo "$agent_status"   | jq -r '.statuses[0].message // "unknown"')
-            version=$(echo "$agent_status"   | jq -r '.vmAgentVersion // "unknown"')
-            heartbeat=$(echo "$agent_status" | jq -r '.statuses[0].time // "unknown"')
+            display=$(echo "$instance_json"   | jq -r '.instanceView.vmAgent.statuses[0].displayStatus // "unknown"')
+            message=$(echo "$instance_json"   | jq -r '.instanceView.vmAgent.statuses[0].message // "unknown"')
+            version=$(echo "$instance_json"   | jq -r '.instanceView.vmAgent.vmAgentVersion // "unknown"')
+            heartbeat=$(echo "$instance_json" | jq -r '.instanceView.vmAgent.statuses[0].time // "unknown"')
+            prov_state=$(echo "$instance_json"  | jq -r '.instanceView.statuses[]? | select(.code | startswith("ProvisioningState/")) | .code' | head -n1)
+            power_state=$(echo "$instance_json" | jq -r '.instanceView.statuses[]? | select(.code | startswith("PowerState/")) | .code' | head -n1)
 
-            echo "attempt $i: status=$display version=$version message=$message heartbeat=$heartbeat"
+            echo "attempt $i: status=$display version=$version message=$message heartbeat=$heartbeat prov=${prov_state:-unknown} power=${power_state:-unknown}"
+
+            # Fast-fail on terminal failure states so a crashed/abandoned
+            # VM does not consume the full 5-minute poll window.
+            case "${power_state:-}" in
+              PowerState/stopped|PowerState/deallocated)
+                echo "::error::VM $vm_name is $power_state — likely crashed or stuck in a reboot loop"
+                dump_diagnostics
+                exit 1
+                ;;
+            esac
+            if [ "${prov_state:-}" = "ProvisioningState/failed" ]; then
+              echo "::error::VM $vm_name provisioning failed: $prov_state"
+              dump_diagnostics
+              exit 1
+            fi
 
             if [ "$display" = "Ready" ]; then
               echo "waagent is ready"
@@ -678,8 +725,7 @@ jobs:
 
           if [ "$display" != "Ready" ]; then
             echo "::error::waagent did not become ready after 30 attempts"
-            echo "--- Boot diagnostics (last 50 lines) ---"
-            az vm boot-diagnostics get-boot-log -g "$RG" -n "$vm_name" 2>/dev/null | tail -50 || echo "(boot diagnostics unavailable)"
+            dump_diagnostics
             exit 1
           fi
 
@@ -794,8 +840,29 @@ jobs:
         run: |
           set -euo pipefail
 
-          # waagent readiness (step 1) guarantees the SSH key has been written
-          # to authorized_keys — SSH should succeed on the first attempt.
+          # waagent readiness + a successful run-command prove the control
+          # plane is alive and the SSH key has been injected. The data-plane
+          # path (NSG rule propagation, public-IP / NAT, sshd binding) is
+          # independent and may need a few extra seconds, so do a quick TCP
+          # readiness check on port 22 before attempting auth. This is not
+          # a retry loop — it just gates on reachability.
+          echo "waiting for TCP/22 on $IP to become reachable..."
+          tcp_ok=false
+          for i in $(seq 1 12); do
+            if nc -z -w 5 "$IP" 22; then
+              echo "TCP/22 reachable after $i attempt(s)"
+              tcp_ok=true
+              break
+            fi
+            sleep 5
+          done
+          if [ "$tcp_ok" != "true" ]; then
+            echo "::error::TCP/22 on $IP not reachable after 60s — check NSG rules, public IP, sshd"
+            exit 1
+          fi
+
+          # Single SSH attempt: waagent has confirmed key injection, sshd
+          # is reachable, so authentication should succeed on first try.
           out=$(ssh \
             -i "$SSH_DIR/id" \
             -o StrictHostKeyChecking=accept-new \
