@@ -643,9 +643,8 @@ jobs:
           fi
           echo "public_ip=$ip" >> "$GITHUB_OUTPUT"
 
-      - name: Wait for SSH on VM
+      - name: Poll waagent readiness
         env:
-          IP: ${{ steps.vm.outputs.public_ip }}
           RG: ${{ needs.prepare.outputs.rg }}
           DISK_CONTROLLER: ${{ matrix.disk_controller }}
         run: |
@@ -653,118 +652,39 @@ jobs:
           ctrl_lower=$(echo "$DISK_CONTROLLER" | tr '[:upper:]' '[:lower:]')
           vm_name="smoke-vm-${ctrl_lower}"
 
-          # Poll for SSH, but also check the VM's power state via
-          # az vm get-instance-view to detect reboot loops or failed
-          # provisioning early instead of waiting the full 5 minutes.
-          provisioning_failed=false
+          # Poll the Azure control plane for waagent readiness.
+          # displayStatus == "Ready" means the guest agent is live and has
+          # written the SSH key to authorized_keys — SSH will work on the
+          # first attempt without any retry loop.
+          # 30 attempts × 10s = 5 minutes max.
+          display="unknown"
           for i in $(seq 1 30); do
-            if nc -z -w 5 "$IP" 22; then
-              echo "SSH reachable after $i attempt(s)"
-              exit 0
+            agent_status=$(az vm get-instance-view -g "$RG" -n "$vm_name" \
+              --query 'instanceView.vmAgent' -o json 2>/dev/null || true)
+
+            display=$(echo "$agent_status"   | jq -r '.statuses[0].displayStatus // "unknown"')
+            message=$(echo "$agent_status"   | jq -r '.statuses[0].message // "unknown"')
+            version=$(echo "$agent_status"   | jq -r '.vmAgentVersion // "unknown"')
+            heartbeat=$(echo "$agent_status" | jq -r '.statuses[0].time // "unknown"')
+
+            echo "attempt $i: status=$display version=$version message=$message heartbeat=$heartbeat"
+
+            if [ "$display" = "Ready" ]; then
+              echo "waagent is ready"
+              break
             fi
-
-            # Every 5th attempt (~50s), query the VM instance view for
-            # signs of trouble: failed provisioning or a VM that has
-            # stopped (indicating a crash/reboot-loop that Azure gave up on).
-            if [ $((i % 5)) -eq 0 ]; then
-              echo "Checking VM instance view (attempt $i)..."
-              instance_json=$(az vm get-instance-view -g "$RG" -n "$vm_name" -o json 2>/dev/null || true)
-              if [ -n "$instance_json" ]; then
-                prov_state=$(echo "$instance_json" | jq -r '.instanceView.statuses[]? | select(.code | startswith("ProvisioningState/")) | .code' 2>/dev/null || true)
-                power_state=$(echo "$instance_json" | jq -r '.instanceView.statuses[]? | select(.code | startswith("PowerState/")) | .code' 2>/dev/null || true)
-                echo "  ProvisioningState: ${prov_state:-unknown}"
-                echo "  PowerState: ${power_state:-unknown}"
-
-                # Detect VM stopped/deallocated (reboot loop that Azure gave up on)
-                if echo "$power_state" | grep -qiE 'stopped|deallocated'; then
-                  echo "::error::VM $vm_name is $power_state — likely crashed or stuck in a reboot loop"
-                  provisioning_failed=true
-                  break
-                fi
-                # Detect failed provisioning (e.g. OSProvisioningTimedOut)
-                if echo "$prov_state" | grep -qi 'failed'; then
-                  echo "::error::VM $vm_name provisioning failed: $prov_state"
-                  provisioning_failed=true
-                  break
-                fi
-              fi
-            fi
-
             sleep 10
           done
 
-          if [ "$provisioning_failed" = true ]; then
-            # Try to fetch boot diagnostics for additional context
+          if [ "$display" != "Ready" ]; then
+            echo "::error::waagent did not become ready after 30 attempts"
             echo "--- Boot diagnostics (last 50 lines) ---"
             az vm boot-diagnostics get-boot-log -g "$RG" -n "$vm_name" 2>/dev/null | tail -50 || echo "(boot diagnostics unavailable)"
             exit 1
           fi
 
-          echo "::error::SSH never came up on $IP after 5 minutes"
-          exit 1
-
-      - name: SSH and assert NixOS
-        id: assert
-        env:
-          IP:      ${{ steps.vm.outputs.public_ip }}
-          SSH_DIR: ${{ steps.ssh.outputs.dir }}
-        run: |
-          set -euo pipefail
-
-          # The Azure provisioning agent (waagent/cloud-init) may still be
-          # writing the SSH key to ~azureuser/.ssh/authorized_keys after
-          # sshd is listening.  Retry SSH up to 6 times with 15 s sleeps
-          # between failures.  With ConnectTimeout=15, worst-case wall
-          # time is about 165 s.
-          for attempt in $(seq 1 6); do
-            echo "SSH login attempt $attempt"
-            if out=$(ssh \
-              -i "$SSH_DIR/id" \
-              -o StrictHostKeyChecking=accept-new \
-              -o BatchMode=yes \
-              -o ConnectTimeout=15 \
-              -o IdentitiesOnly=yes \
-              "azureuser@${IP}" \
-              'cat /etc/os-release; echo ---; nixos-version' 2>&1); then
-              break
-            fi
-            echo "  ssh failed: $out"
-            if [ "$attempt" -eq 6 ]; then
-              echo "::error::SSH login failed after 6 attempts: $out"
-              exit 1
-            fi
-            sleep 15
-          done
-
-          echo "$out"
-          echo ""
-          echo "=========================================="
-          echo "  SSH TEST SUCCESSFUL"
-          echo "  Connected to azureuser@${IP} via SSH"
-          echo "  Attempt: $attempt of 6"
-          echo "=========================================="
-          echo ""
-
-          echo "$out" | grep -Eq '^ID=nixos$' \
-            || { echo "::error::/etc/os-release does not declare ID=nixos"; exit 1; }
-          nv=$(echo "$out" | awk '/^---$/{flag=1;next} flag' | head -n1)
-          if [ -z "$nv" ]; then
-            echo "::error::nixos-version returned empty output"
-            exit 1
-          fi
-          echo ""
-          echo "=========================================="
-          echo "  SMOKE TEST PASSED"
-          echo "  NixOS version: $nv"
-          echo "  OS verified:   ID=nixos"
-          echo "=========================================="
-          echo ""
-          echo "nixos_version=$nv" >> "$GITHUB_OUTPUT"
-
       - name: Test az vm run-command
         id: runcmd
-        # Only run if the SSH test passed (nixos_version is non-empty).
-        if: steps.assert.outputs.nixos_version != ''
         env:
           RG:              ${{ needs.prepare.outputs.rg }}
           DISK_CONTROLLER: ${{ matrix.disk_controller }}
@@ -865,6 +785,50 @@ jobs:
 
           # Fail the step if assertions did not pass.
           [ "$run_command_ok" = "true" ] || exit 1
+
+      - name: SSH and assert NixOS
+        id: assert
+        env:
+          IP:      ${{ steps.vm.outputs.public_ip }}
+          SSH_DIR: ${{ steps.ssh.outputs.dir }}
+        run: |
+          set -euo pipefail
+
+          # waagent readiness (step 1) guarantees the SSH key has been written
+          # to authorized_keys — SSH should succeed on the first attempt.
+          out=$(ssh \
+            -i "$SSH_DIR/id" \
+            -o StrictHostKeyChecking=accept-new \
+            -o BatchMode=yes \
+            -o ConnectTimeout=30 \
+            -o IdentitiesOnly=yes \
+            "azureuser@${IP}" \
+            'cat /etc/os-release; echo ---; nixos-version' 2>&1) \
+            || { echo "::error::SSH login failed: $out"; exit 1; }
+
+          echo "$out"
+          echo ""
+          echo "=========================================="
+          echo "  SSH TEST SUCCESSFUL"
+          echo "  Connected to azureuser@${IP} via SSH"
+          echo "=========================================="
+          echo ""
+
+          echo "$out" | grep -Eq '^ID=nixos$' \
+            || { echo "::error::/etc/os-release does not declare ID=nixos"; exit 1; }
+          nv=$(echo "$out" | awk '/^---$/{flag=1;next} flag' | head -n1)
+          if [ -z "$nv" ]; then
+            echo "::error::nixos-version returned empty output"
+            exit 1
+          fi
+          echo ""
+          echo "=========================================="
+          echo "  SMOKE TEST PASSED"
+          echo "  NixOS version: $nv"
+          echo "  OS verified:   ID=nixos"
+          echo "=========================================="
+          echo ""
+          echo "nixos_version=$nv" >> "$GITHUB_OUTPUT"
 
       - name: Job summary
         if: always()
