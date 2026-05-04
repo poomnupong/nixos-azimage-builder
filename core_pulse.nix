@@ -147,6 +147,22 @@
   virtualisation.azureImage.vmGeneration = "v2";
 
   # ---------------------------------------------------------------------------
+  # ESP mount hardening
+  #
+  # nixpkgs' azure-image.nix defines fileSystems."/boot" with device and
+  # fsType but no mount options.  The vfat defaults leave the ESP
+  # world-readable (fmask=0022, dmask=0022), which causes `bootctl
+  # status` to warn:
+  #
+  #   "The ESP /boot is world-accessible — this is a security concern."
+  #
+  # Restrict permissions so only root can read the ESP contents.
+  # Downstream configs that re-declare /boot no longer need to add
+  # these options themselves.
+  # ---------------------------------------------------------------------------
+  fileSystems."/boot".options = [ "fmask=0077" "dmask=0077" ];
+
+  # ---------------------------------------------------------------------------
   # Disk controller + network driver support (SCSI + NVMe, netvsc + MANA)
   #
   # Azure VM families differ in which remote-disk controller they expose to
