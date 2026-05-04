@@ -226,6 +226,30 @@ if you chose the alternative storage-account flow.
 
 ---
 
+## Bootloader contract (downstream hosts)
+
+The base image uses **GRUB-EFI** as configured by nixpkgs'
+`virtualisation/azure-image.nix`.  If you consume this image from a
+downstream NixOS configuration (e.g. via `nixos-rebuild` after first
+boot), your host `hardware.nix` **must** align with the image's
+bootloader and ESP layout:
+
+| Setting | Required value | Why |
+|---------|----------------|-----|
+| `boot.loader.grub.enable` | `true` | Image ships GRUB, not systemd-boot |
+| `boot.loader.grub.efiSupport` | `true` | Gen2 VMs boot via UEFI |
+| `boot.loader.grub.device` | `"nodev"` | EFI systems do not use a BIOS MBR device |
+| `boot.loader.grub.efiInstallAsRemovable` | `true` | Azure firmware looks for the fallback EFI path |
+| `boot.loader.systemd-boot.enable` | `false` | Must not conflict with GRUB |
+| `fileSystems."/boot".device` | `"/dev/disk/by-label/ESP"` | Partition label written by `azure-image.nix` |
+| `fileSystems."/boot".fsType` | `"vfat"` | Standard EFI System Partition format |
+
+Using `systemd-boot` or mounting `/boot` from a different label (e.g.
+`boot` instead of `ESP`) will cause `nixos-rebuild switch` to fail or
+render the VM unbootable.
+
+---
+
 ## Security type
 
 Images are built as **Generation 2** (UEFI/GPT) with **Standard** security.
