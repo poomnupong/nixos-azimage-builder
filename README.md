@@ -3,6 +3,10 @@
 [![Weekly Forge](https://github.com/poomnupong/nixos-azimage-builder/actions/workflows/weekly_forge.yml/badge.svg)](https://github.com/poomnupong/nixos-azimage-builder/actions/workflows/weekly_forge.yml)
 [![Azure Smoke Test](https://github.com/poomnupong/nixos-azimage-builder/actions/workflows/azure-smoke-test.yml/badge.svg)](https://github.com/poomnupong/nixos-azimage-builder/actions/workflows/azure-smoke-test.yml)
 
+> **Proof of concept only:** This repository no longer produces NixOS images.
+> Image builds and scheduled workflows are disabled. The documentation below
+> describes the original project and is retained for reference.
+
 > **Non-Profit / Reference Use.**  
 > This repository is provided as a reference implementation for building
 > customised NixOS VHD images for Microsoft Azure.  It is intended for
